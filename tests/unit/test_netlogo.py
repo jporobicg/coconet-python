@@ -11,7 +11,8 @@ from coconet.netlogo import NetLogoRng, heading_from_dx_dy, nl_median, nl_round
         (1.4, 1),
         (1.5, 2),
         (-1.4, -1),
-        (-1.5, -2),
+        (-1.5, -1),
+        (-2.5, -2),
     ],
 )
 def test_nl_round(value: float, expected: int) -> None:
