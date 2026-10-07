@@ -8,9 +8,7 @@ import numpy as np
 
 
 def nl_round(value: float) -> int:
-    if value >= 0:
-        return math.floor(value + 0.5)
-    return math.ceil(value - 0.5)
+    return math.floor(value + 0.5)
 
 
 def nl_ceiling(value: float) -> int:
@@ -52,10 +50,14 @@ class NetLogoRng:
         return float(self._rs.random_sample() * upper)
 
     def random_int(self, upper: float) -> int:
-        n = math.floor(upper)
-        if n <= 0:
+        n = int(upper)
+        if n != upper:
+            n = n + 1 if upper > 0 else n - 1
+        if n == 0:
             return 0
-        return int(self._rs.randint(0, n))
+        if n > 0:
+            return int(self._rs.randint(0, n))
+        return -int(self._rs.randint(0, -n))
 
     def one_of(self, indices: np.ndarray) -> int | None:
         if indices.size == 0:

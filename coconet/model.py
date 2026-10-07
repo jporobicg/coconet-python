@@ -448,7 +448,8 @@ class CoconetModel:
                 if (prob - reduction) > self.rng.random_float(1.0):
                     self.bleaching()
 
-            for reef_idx in range(self.number_of_reefs):
+            for reef_idx in self.rng._rs.permutation(self.number_of_reefs):
+                reef_idx = int(reef_idx)
                 self.grow_corals(reef_idx)
                 self.grow_cots(reef_idx)
                 self.grow_fish(reef_idx)
@@ -458,20 +459,15 @@ class CoconetModel:
 
             self._apply_interventions()
 
-            for reef_idx in range(self.number_of_reefs):
-                self.spawn_corals(reef_idx)
+            for reef_idx in self.rng._rs.permutation(self.number_of_reefs):
+                self.spawn_corals(int(reef_idx))
 
-            if 0.5 * (
-                1
-                + math.sin(
-                    2 * 3.1416 * (2010 + self.S_phase + self.rng.random_float(4) - self.year) / 16
-                )
-            ) > self.rng.random_float(2 * self.S_spawning_failure):
-                for reef_idx in range(self.number_of_reefs):
-                    self.spawn_cots(reef_idx)
+            if self._cots_spawn_gate() > self.rng.random_float(2 * self.S_spawning_failure):
+                for reef_idx in self.rng._rs.permutation(self.number_of_reefs):
+                    self.spawn_cots(int(reef_idx))
 
-            for reef_idx in range(self.number_of_reefs):
-                self.spawn_fish(reef_idx)
+            for reef_idx in self.rng._rs.permutation(self.number_of_reefs):
+                self.spawn_fish(int(reef_idx))
 
             self.reef_populations()
             if self.ensemble == 0 and self.year == self.cfg.start_year:
@@ -491,6 +487,14 @@ class CoconetModel:
                 self.write_output()
 
             self.year += 1
+
+    def _cots_spawn_gate(self) -> float:
+        """CoTS spawning success probability gate (legacy line 1067).
+        
+        Returns probability from 0-1 based on sinusoidal cycle. NetLogo sin takes degrees.
+        """
+        angle = 2 * 3.1416 * (2010 + self.S_phase + self.rng.random_float(4) - self.year) / 16
+        return 0.5 * (1 + math.sin(math.radians(angle)))
 
     # ---- setup helpers ----
     def _load_coastline(self) -> None:
@@ -786,7 +790,14 @@ class CoconetModel:
             self.T[:] = self.T_i
             for g in CORAL_GROUPS:
                 self.C[g][:] = self.C_i[g]
-            self.C_site[:] = self.C_site_i
+            self.C_site[:] = (
+                self.C["sa"]
+                + self.C["ta"]
+                + self.C["mo"]
+                + self.C["po"]
+                + self.C["fa"]
+                + self.C["tt"]
+            )
             self.R_site[:] = self.R_site_i
 
         self.reef_populations()
@@ -843,7 +854,7 @@ class CoconetModel:
             * np.exp(-1.0 * (c_site + r_site))
         )
         b = b * (1 + self.B_recruit) - predation - self.B_recruit * b * b / self.B_max
-        b = np.clip(b, 100.0, self.B_max * (c_site + r_site))
+        b = np.array([nl_median(100.0, bb, hh) for bb, hh in zip(b, self.B_max * (c_site + r_site))])
         self.B[sl] = b
 
         predation = (
@@ -854,7 +865,7 @@ class CoconetModel:
             * np.exp(-1.0 * c_site)
         )
         t = t * (1 + self.T_recruit) - predation - self.T_recruit * t * t / self.T_max
-        t = np.clip(t, 1.0, self.T_max * c_site)
+        t = np.array([nl_median(1.0, tt, hh) for tt, hh in zip(t, self.T_max * c_site)])
         self.T[sl] = t
 
         mortality = self.E_mort * temp_depend / (1.0 + self.C_reef[reef_idx])
@@ -1012,8 +1023,7 @@ class CoconetModel:
             pH_effect_t = (1.0 - self.pH_protect[reef_idx]) * math.sqrt(self.cfg.SSP)
 
         sl = self._sites_for_reef(reef_idx)
-        who = self.site_who[sl]
-        rubble_retention = (who % 11) / 20.0
+        rubble_retention = (self.reef_who[reef_idx] % 11) / 20.0
 
         mask = (self.C_site[sl] + self.R_site[sl]) < 0.8
         if np.any(mask):
@@ -1039,8 +1049,8 @@ class CoconetModel:
             self.C["sa"][sl]
             + self.C["ta"][sl]
             + self.C["mo"][sl]
-            + self.C["po"][sl]
             + self.C["fa"][sl]
+            + self.C["po"][sl]
             + self.C["tt"][sl]
         )
 
@@ -1060,8 +1070,8 @@ class CoconetModel:
             self.C["sa"][sl]
             + self.C["ta"][sl]
             + self.C["mo"][sl]
-            + self.C["po"][sl]
             + self.C["fa"][sl]
+            + self.C["po"][sl]
             + self.C["tt"][sl]
         )
 
@@ -1243,9 +1253,9 @@ class CoconetModel:
         kernel = self._reef_kernel(
             reef_idx, self._kernel_base_coral(self.draw_year, self.draw_month)
         )
-        recruits_total = 0.0
+        self._recruits_total = 0.0
 
-        recruits_total += self._spawn_coral_kernel(
+        self._spawn_coral_kernel(
             reef_idx,
             kernel.con1,
             kernel.dir1,
@@ -1259,7 +1269,7 @@ class CoconetModel:
             c_tt_source,
             thermal_source,
         )
-        recruits_total += self._spawn_coral_kernel(
+        self._spawn_coral_kernel(
             reef_idx,
             kernel.con2,
             kernel.dir2,
@@ -1279,8 +1289,8 @@ class CoconetModel:
             self.C["sa"][sl]
             + self.C["ta"][sl]
             + self.C["mo"][sl]
-            + self.C["po"][sl]
             + self.C["fa"][sl]
+            + self.C["po"][sl]
             + self.C["tt"][sl]
         )
         over = (self.C_site[sl] + self.R_site[sl]) > 0.7
@@ -1292,8 +1302,8 @@ class CoconetModel:
             self.C["sa"][sl]
             + self.C["ta"][sl]
             + self.C["mo"][sl]
-            + self.C["po"][sl]
             + self.C["fa"][sl]
+            + self.C["po"][sl]
             + self.C["tt"][sl]
         )
         over1 = (self.C_site[sl] + self.R_site[sl]) > 1.0
@@ -1305,7 +1315,7 @@ class CoconetModel:
             self.C["tt"][sl][over1] = 0.0
             self.C["sa"][sl][over1] = 0.1
             self.R_site[sl][over1] = 0.1
-        self.C_out_degree[reef_idx] = recruits_total
+        self.C_out_degree[reef_idx] = self._recruits_total
 
     def _spawn_coral_kernel(
         self,
@@ -1321,7 +1331,7 @@ class CoconetModel:
         c_fa_source: float,
         c_tt_source: float,
         thermal_source: dict[str, float],
-    ) -> float:
+    ) -> None:
         """Dispersal cone for one connectivity kernel; updates C and thermal per site.
 
         Recruitment matches the former six-call ``_calculate_recruitment`` loop per
@@ -1337,13 +1347,16 @@ class CoconetModel:
 
         **No intentional behavioural change:** reads use pre-update cover/thermal;
         writes match the old loop order (sa, tt, ta, mo, po, fa).
+        
+        **Accumulation:** Recruits are accumulated into ``self._recruits_total``
+        to maintain NetLogo's single running sum across both kernels.
         """
         if distance <= 0 or con <= 0:
-            return 0.0
+            return
         radius = distance * self.per_km
         targets, dists = self._targets_in_cone(source, radius, direction, angle)
         if targets.size == 0:
-            return 0.0
+            return
         include = self.rng._rs.random_sample(size=targets.size) > (dists / radius)
         # Batched recruitment (see module doc note on _spawn_coral_kernel).
         src_arr = np.array(
@@ -1376,8 +1389,7 @@ class CoconetModel:
                 for i, g in enumerate(CORAL_SPAWN_KERNEL_ORDER):
                     self.C[g][s] += recruits[i]
                     self.thermal[g][s] = thermal_new[i]
-                    recruits_total += recruits[i]
-        return recruits_total
+                    self._recruits_total += recruits[i]
 
     def spawn_cots(self, reef_idx: int) -> None:
         self._seed_year()
