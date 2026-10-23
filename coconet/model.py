@@ -98,7 +98,7 @@ class CoconetModel:
         self.k_fa = 0.0020
         self.k_tt = 0.0010
         self.pH_scale = 100.0
-        self.dhw_scale = 30.0
+        self.dhw_scale = 50.0
 
         self.B_max = 10000.0
         self.B_recruit = 0.5
@@ -106,12 +106,12 @@ class CoconetModel:
         self.T_max = 200.0
         self.T_recruit = 0.8
         self.T_pred_B = 120.0
-        self.E_recruit = 0.0028
-        self.E_mort = 0.026
+        self.E_recruit = 0.005
+        self.E_mort = 0.025
         self.E_natal = 0.1
         self.E_pred_S1 = 500.0
         self.E_pred_S = 50.0
-        self.G_recruit = 4.0
+        self.G_recruit = 7.0
         self.G_mort = 0.01
         self.G_pred_T = 70.0
         self.reporting_ratio = 0.5
@@ -133,13 +133,15 @@ class CoconetModel:
             "tt": 7.5,
         }
 
-        self.C_recruit = 0.05
+        self.C_recruit = 0.08
+        self.C_allee = 0.02
         self.S_spawning_threshold = 3.0
-        self.S_spawning_failure = 0.7
+        self.S_allee = 3.0
+        self.S_spawning_failure = 0.5
         self.S_phase = 1.0
-        self.S_recruit = 300000.0
+        self.S_recruit = 200000.0
         self.S_pred_C = 0.0003
-        self.S_prefer = 0.55
+        self.S_prefer = 0.4
         self.S_mort = 0.8
         self.S1_mort = self.S_mort
         self.S2_mort = 0.0
@@ -882,7 +884,7 @@ class CoconetModel:
         self.E["2"][reef_idx] = nl_round(
             self.E["1"][reef_idx] * max(0.0, (1 - 1.0 * mortality * self.E["1"][reef_idx]))
         )
-        self.E["1"][reef_idx] = nl_round(self.E["0"][reef_idx] * self.C_reef[reef_idx] ** 0.2)
+        self.E["1"][reef_idx] = nl_round(self.E["0"][reef_idx] * self.C_reef[reef_idx] ** 0.6)
 
         mortality = self.G_mort * temp_depend / (1.0 + self.C_reef[reef_idx])
         self.G["5"][reef_idx] = nl_round(
@@ -898,7 +900,7 @@ class CoconetModel:
         self.G["2"][reef_idx] = nl_round(
             self.G["1"][reef_idx] * max(0.0, (1 - 1.0 * mortality * self.G["1"][reef_idx]))
         )
-        self.G["1"][reef_idx] = nl_round(self.G["0"][reef_idx] * self.C_reef[reef_idx] ** 0.2)
+        self.G["1"][reef_idx] = nl_round(self.G["0"][reef_idx] * self.C_reef[reef_idx] ** 0.6)
 
     def apply_fishing(self) -> None:
         self._seed_year()
@@ -1169,7 +1171,7 @@ class CoconetModel:
                     * self.S[a][s]
                     / (self.S[a][s] + self.E_pred_S * e_site + self.small)
                 )
-                self.S[a][s] = nl_ceiling(max(1.0, self.S[a][s] - pred))
+                self.S[a][s] = nl_ceiling(max(0.0, self.S[a][s] - pred))
 
     def spawn_fish(self, reef_idx: int) -> None:
         self._seed_year()
@@ -1182,7 +1184,7 @@ class CoconetModel:
             + 2 * self.G["3"][reef_idx]
             + 4 * self.G["4"][reef_idx]
             + 8 * self.G["5"][reef_idx]
-        ) * (1 - 0.004 * (self.y[reef_idx] + 25) ** 2)
+        ) * max(0.0, 1 - 0.004 * (self.y[reef_idx] + 25) ** 2)
         self.G["0"][reef_idx] = self.rng.random_int(
             (kernel.con1 + kernel.con2) * self.G_recruit * g_source * g_natal
         )
@@ -1194,8 +1196,8 @@ class CoconetModel:
             reef_idx, g_source, g_natal, kernel.con2, kernel.dir2, kernel.ang2, kernel.dis2
         )
 
-        e_source = (self.E["4"][reef_idx] + 2 * self.E["5"][reef_idx]) * (
-            1 - 0.004 * (self.y[reef_idx] + 25) ** 2
+        e_source = (self.E["4"][reef_idx] + 2 * self.E["5"][reef_idx]) * max(
+            0.0, 1 - 0.004 * (self.y[reef_idx] + 25) ** 2
         )
         self.E["0"][reef_idx] = self.rng.random_int(
             self.E_recruit * e_source * self.E_natal * self.reef_sites[reef_idx]
@@ -1235,18 +1237,36 @@ class CoconetModel:
             return
 
         hybrid = self.cfg.hybrid_fraction * self.C["sa"][src_site]
-        c_sa_source = (self.C["sa"][src_site] - hybrid) + hybrid * (
-            (hybrid * hybrid + 2 * (1 - self.cfg.dominance) * hybrid * self.C["tt"][src_site])
-            / ((hybrid + self.C["tt"][src_site] + self.small) ** 2)
+        allee_sa = math.exp(-1.0 * (self.C_allee / (self.small + self.C["sa"][src_site])) ** 0.5)
+        c_sa_source = allee_sa * (
+            (self.C["sa"][src_site] - hybrid)
+            + hybrid
+            * (
+                (hybrid * hybrid + 2 * (1 - self.cfg.dominance) * hybrid * self.C["tt"][src_site])
+                / ((hybrid + self.C["tt"][src_site] + self.small) ** 2)
+            )
         )
-        c_ta_source = self.C["ta"][src_site]
-        c_mo_source = self.C["mo"][src_site]
-        c_po_source = self.C["po"][src_site]
-        c_fa_source = self.C["fa"][src_site]
-        c_tt_source = self.C["tt"][src_site] * (
-            self.C["tt"][src_site]
-            * ((2 * self.cfg.dominance * hybrid) + self.C["tt"][src_site])
-            / ((hybrid + self.C["tt"][src_site] + self.small) ** 2)
+        c_ta_source = self.C["ta"][src_site] * math.exp(
+            -1.0 * (self.C_allee / (self.small + self.C["ta"][src_site])) ** 0.5
+        )
+        c_mo_source = self.C["mo"][src_site] * math.exp(
+            -1.0 * (self.C_allee / (self.small + self.C["mo"][src_site])) ** 0.5
+        )
+        c_po_source = self.C["po"][src_site] * math.exp(
+            -1.0 * (self.C_allee / (self.small + self.C["po"][src_site])) ** 0.5
+        )
+        c_fa_source = self.C["fa"][src_site] * math.exp(
+            -1.0 * (self.C_allee / (self.small + self.C["fa"][src_site])) ** 0.5
+        )
+        allee_tt = math.exp(-1.0 * (self.C_allee / (self.small + self.C["tt"][src_site])) ** 0.5)
+        c_tt_source = (
+            allee_tt
+            * self.C["tt"][src_site]
+            * (
+                self.C["tt"][src_site]
+                * ((2 * self.cfg.dominance * hybrid) + self.C["tt"][src_site])
+                / ((hybrid + self.C["tt"][src_site] + self.small) ** 2)
+            )
         )
 
         thermal_source = {g: self.thermal[g][src_site] for g in CORAL_GROUPS}
@@ -1404,14 +1424,14 @@ class CoconetModel:
             adults = (
                 self.S["2"][s] + self.S["3"][s] + self.S["4"][s] + self.S["5"][s] + self.S["6"][s]
             )
-            if adults > self.S_spawning_threshold:
-                s_source += (
-                    self.S["2"][s]
-                    + 2 * self.S["3"][s]
-                    + 4 * self.S["4"][s]
-                    + 8 * self.S["5"][s]
-                    + 8 * self.S["6"][s]
-                )
+            allee = math.exp(-1.0 * (self.S_allee / (self.small + adults)) ** 0.5)
+            s_source += (
+                self.S["2"][s]
+                + 2 * self.S["3"][s]
+                + 4 * self.S["4"][s]
+                + 8 * self.S["5"][s]
+                + 8 * self.S["6"][s]
+            ) * allee
         for s in range(sl.start, sl.stop):
             self.S["0"][s] += self.rng.random_int(
                 (kernel.con1 + kernel.con2) * self.S_recruit * s_source * s_natal * self.R_site[s]
@@ -1698,18 +1718,26 @@ class CoconetModel:
         bleaching_centre: int | None = None
         if self.year > 1997 and self.year < self.cfg.projection_year:
             historical = {
-                1998: (8, (-21, -20)),
-                2002: (10, (-21, -20)),
-                2016: (9, (-12, -11)),
-                2017: (8, (-17, -16)),
-                2020: (6, (-20, -19)),
-                2022: (6, (-18, -17)),
+                1998: (4.5, (-22, -21)),
+                2002: (12.0, (-22, -21)),
+                2003: (6.0, (-22, -21)),
+                2016: (11.5, (-12, -11)),
+                2017: (11.5, (-16, -15)),
+                2020: (10.5, (-20, -19)),
+                2022: (8.0, (-16, -15)),
+                2024: (10.5, (-22, -21)),
             }
             if self.year in historical:
                 dhw_max, lat_band = historical[self.year]
                 candidates = np.flatnonzero((self.y > lat_band[0]) & (self.y < lat_band[1]))
                 if candidates.size > 0:
                     bleaching_centre = int(candidates[self.rng.random_int(candidates.size)])
+                else:
+                    import warnings
+                    warnings.warn(
+                        f"Historical bleaching event {self.year}: empty latitude band "
+                        f"({lat_band[0]}, {lat_band[1]}), no reefs found"
+                    )
         elif self.year >= self.cfg.projection_year:
             self._seed_year()
             if self.cfg.SSP == 1.9:
@@ -1719,7 +1747,7 @@ class CoconetModel:
             if self.cfg.SSP == 4.5:
                 dhw_max = (8 - self.rng.random_float(16)) + 0.221 * self.year - 444
             if self.cfg.SSP == 7.0:
-                dhw_max = (8 - self.rng.random_float(16)) + 0.0039 * (self.year - 2010) ** 2 + 2
+                dhw_max = (8 - self.rng.random_float(16)) + 0.0037 * (self.year - 2010) ** 2 + 4
             if self.cfg.SSP == 8.5:
                 dhw_max = (8 - self.rng.random_float(16)) + 0.0047 * (self.year - 2000) ** 2 + 1
             bleaching_centre = self.rng.random_int(self.number_of_reefs)
@@ -1727,15 +1755,25 @@ class CoconetModel:
         if dhw_max <= 0 or bleaching_centre is None:
             return
 
-        bleaching_radius = self.dhw_scale * dhw_max * (0.5 + self.rng.random_float(1.0))
+        bleaching_radius = (self.dhw_scale * self.per_km) * dhw_max * (
+            0.5 + self.rng.random_float(1.0)
+        )
         centre_dist = self.dist_matrix[bleaching_centre]
         affected = np.flatnonzero(centre_dist <= bleaching_radius)
-        for reef_idx in affected:
+        
+        # NetLogo uses random ask order for reefs
+        affected_permuted = self.rng._rs.permutation(affected)
+        
+        for reef_idx in affected_permuted:
             radial = 1 - nl_median(
                 0,
-                ((centre_dist[reef_idx] / self.per_km / bleaching_radius) ** 2),
+                ((centre_dist[reef_idx] / bleaching_radius) ** 2),
                 1,
             )
+            # NetLogo draws rand at reef level but overwrites it at site level (line 2351 vs 2357)
+            # Must draw to maintain RNG stream alignment
+            _ = (0.5 + self.rng.random_float(0.5)) * radial
+            
             self.dhw[reef_idx] = (
                 dhw_max
                 * radial
@@ -1817,6 +1855,12 @@ class CoconetModel:
                     self.cyclone_category = cat
                     self.cyclone_centre = int(candidates[self.rng.random_int(candidates.size)])
                     self.cyclone_mortality()
+                else:
+                    import warnings
+                    warnings.warn(
+                        f"Historical cyclone event {self.year}: empty latitude band "
+                        f"({lat_band[0]}, {lat_band[1]}), no reefs found"
+                    )
         else:
             if self.rng.random_int(100) < 21:
                 self.cyclone_radius = (200 + self.rng.random_int(500)) * self.per_km
@@ -1842,8 +1886,14 @@ class CoconetModel:
             return
         d = self.dist_matrix[self.cyclone_centre]
         affected = np.flatnonzero(d <= self.cyclone_radius)
-        for reef_idx in affected:
-            radial = 1 - nl_median(0, ((d[reef_idx] / self.per_km / self.cyclone_radius) ** 2), 1)
+        
+        # NetLogo uses random ask order for reefs
+        affected_permuted = self.rng._rs.permutation(affected)
+        
+        for reef_idx in affected_permuted:
+            radial = 1 - nl_median(
+                0, ((d[reef_idx] / self.cyclone_radius) ** 2), 1
+            )
             shelter = math.sqrt(
                 self.reef_sites[reef_idx] * self.number_of_reefs / self.number_of_sites
             )
@@ -1853,22 +1903,22 @@ class CoconetModel:
                 mort_max = rand * (0.25 * self.cyclone_category - 0.30)
                 mort_min = rand * max(0.0, 0.3 * self.cyclone_category - 0.9)
                 self.cyclone_mort["sa"][s] = (1.0 * mort_max + 0.0 * mort_min) * (
-                    self.rate_i["sa"] / self.rate["sa"][s]
+                    self.rate_i["sa"] / (self.rate["sa"][s] + self.small)
                 )
                 self.cyclone_mort["ta"][s] = (0.9 * mort_max + 0.1 * mort_min) * (
-                    self.rate_i["ta"] / self.rate["ta"][s]
+                    self.rate_i["ta"] / (self.rate["ta"][s] + self.small)
                 )
                 self.cyclone_mort["mo"][s] = (0.7 * mort_max + 0.3 * mort_min) * (
-                    self.rate_i["mo"] / self.rate["mo"][s]
+                    self.rate_i["mo"] / (self.rate["mo"][s] + self.small)
                 )
                 self.cyclone_mort["po"][s] = (0.1 * mort_max + 0.9 * mort_min) * (
-                    self.rate_i["po"] / self.rate["po"][s]
+                    self.rate_i["po"] / (self.rate["po"][s] + self.small)
                 )
                 self.cyclone_mort["fa"][s] = (0.0 * mort_max + 1.0 * mort_min) * (
-                    self.rate_i["fa"] / self.rate["fa"][s]
+                    self.rate_i["fa"] / (self.rate["fa"][s] + self.small)
                 )
                 self.cyclone_mort["tt"][s] = (1.0 * mort_max + 0.0 * mort_min) * (
-                    self.rate_i["tt"] / self.rate["tt"][s]
+                    self.rate_i["tt"] / (self.rate["tt"][s] + self.small)
                 )
                 self.R_site[s] = nl_median(
                     0.0,
@@ -2016,12 +2066,52 @@ class CoconetModel:
             self.reef_shading[self.priority <= 100 * self.ensemble] = 1.0
         if mode == "Fish-protection":
             self.future_rezone_year[self.priority <= 100 * self.ensemble] = 2026
-        if mode == "ShadingPlusControl":
+        if mode == "Control-plus-replenishment":
+            for reef_idx in np.flatnonzero(self.priority <= 100 * self.ensemble):
+                sl = self._sites_for_reef(int(reef_idx))
+                for age in ("2", "3", "4", "5", "6"):
+                    self.S[age][sl] = 0
+                if self.C_reef[reef_idx] < 0.2:
+                    idxs = np.flatnonzero(self.C_site[sl] < 0.2) + sl.start
+                    for s in idxs:
+                        self.C["sa"][s] += 0.01
+                        self.C["ta"][s] += 0.01
+                        self.C["mo"][s] += 0.01
+                        self.C["po"][s] += 0.01
+                        self.C["fa"][s] += 0.01
+        if mode == "Control-plus-shading":
             for reef_idx in np.flatnonzero(self.priority <= 100 * self.ensemble):
                 self.reef_shading[reef_idx] = 1.0
                 sl = self._sites_for_reef(int(reef_idx))
                 for age in ("2", "3", "4", "5", "6"):
                     self.S[age][sl] = 0
+        if mode == "Replenishment-plus-shading":
+            for reef_idx in np.flatnonzero(
+                (self.priority <= 100 * self.ensemble) & (self.C_reef < 0.2)
+            ):
+                self.reef_shading[reef_idx] = 1.0
+                sl = self._sites_for_reef(int(reef_idx))
+                idxs = np.flatnonzero(self.C_site[sl] < 0.2) + sl.start
+                for s in idxs:
+                    self.C["sa"][s] += 0.01
+                    self.C["ta"][s] += 0.01
+                    self.C["mo"][s] += 0.01
+                    self.C["po"][s] += 0.01
+                    self.C["fa"][s] += 0.01
+        if mode == "Control-plus-replenishment-plus-shading":
+            for reef_idx in np.flatnonzero(self.priority <= 100 * self.ensemble):
+                sl = self._sites_for_reef(int(reef_idx))
+                for age in ("2", "3", "4", "5", "6"):
+                    self.S[age][sl] = 0
+                self.reef_shading[reef_idx] = 1.0
+                if self.C_reef[reef_idx] < 0.2:
+                    idxs = np.flatnonzero(self.C_site[sl] < 0.2) + sl.start
+                    for s in idxs:
+                        self.C["sa"][s] += 0.01
+                        self.C["ta"][s] += 0.01
+                        self.C["mo"][s] += 0.01
+                        self.C["po"][s] += 0.01
+                        self.C["fa"][s] += 0.01
 
     def _reef_by_priority(self, p: int) -> int | None:
         idxs = np.flatnonzero(self.priority == p)
