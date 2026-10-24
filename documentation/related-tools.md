@@ -3,6 +3,10 @@ title: Related tools
 description: Viewer app, chart generation, and container image for CoCoNet Python.
 ---
 
+## Manager assistant (`coconet_assistant/` + `app.py`)
+
+Optional Streamlit chat for reef managers: plain-language questions, confirmation of a validated `CoconetConfig`, ensemble runs through `run_coconet`, and plotted summaries versus a baseline. Requires the **`assistant`** extra and a local Ollama model. See `docs/manager-assistant.md` in the repository.
+
 ## React viewer (`viz/`)
 
 A **Vite + React** application for exploring `output.csv` in the browser. See `viz/package.json` for scripts (typically `npm install` / `npm run dev`). Parsing logic lives under `viz` sources (for example TypeScript helpers that read the CSV layout produced by the model).

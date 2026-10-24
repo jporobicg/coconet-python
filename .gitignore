@@ -226,3 +226,6 @@ config/*
 !config/smoke_I_2p6.yaml
 
 outputs
+
+# Manager assistant local cache (ensemble outputs)
+.coconet_assistant_cache/
