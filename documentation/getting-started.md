@@ -54,11 +54,12 @@ pip install .
 coconet --config config/example.yaml --output-file output.csv
 ```
 
-Optional profiling dependencies (CPU profiles via pyinstrument):
+Optional extras:
 
 ```bash
-uv sync --extra profile
-# or: pip install "coconet-python[profile]"
+uv sync --extra profile          # CPU profiles via pyinstrument
+uv sync --extra assistant        # manager Streamlit chat (see docs/manager-assistant.md)
+# or: pip install "coconet-python[profile]" / pip install "coconet-python[assistant]"
 ```
 
 ## First run (CLI)
@@ -108,6 +109,8 @@ See [Configuration]({% link configuration.md %}) for precedence.
 | `config/` | Example YAML (e.g. `example.yaml`) |
 | `legacy/` | Original NetLogo model, reef and coastline CSVs, scenario parameter files |
 | `documentation/` | This Jekyll documentation site |
+| `coconet_assistant/` | Optional manager chat tools (not required by the core model) |
+| `app.py` | Streamlit UI for the assistant (`uv sync --extra assistant`) |
 | `viz/` | Optional React viewer for exploring `output.csv` |
 | `gen-charts/` | Optional Node tooling to render charts from output |
 

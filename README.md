@@ -50,6 +50,23 @@ run_coconet(cfg, configure_logs=True)
 
 For **advanced** embedding you can still construct **`CoconetModel`** directly from **`CoconetConfig`**. See the [Python API](https://gbrrestoration.github.io/coconet-python/python-api/) page for precedence, logging, and `__all__`.
 
+## Manager assistant (optional)
+
+A Streamlit chat (`app.py` + `coconet_assistant/`) lets reef managers ask
+plain-language questions, confirm a scenario, and run an **ensemble** through
+the same Python API. A local Ollama model (Llama or Qwen) stays on-site; every
+number in the briefing comes from the model tools. This is an optional extra
+and is not required to run CoCoNet.
+
+```bash
+uv sync --extra assistant
+ollama pull qwen2.5
+uv run --extra assistant streamlit run app.py
+```
+
+See [docs/manager-assistant.md](docs/manager-assistant.md) for install, example
+questions, architecture, and limits.
+
 ## Why this exists
 
 The `legacy/` directory contains the original monolithic NetLogo model (`CoCoNet V3_rubble.nlogo`) and its data files. This port migrates the model to a modern Python stack for:
@@ -68,6 +85,8 @@ The `legacy/` directory contains the original monolithic NetLogo model (`CoCoNet
   - `api.py` - **library** entry points (`load_coconet_config`, `run_coconet`) for PyPI consumers and embedders,
   - `cli.py` - **CLI** entry point (`coconet` / `python -m coconet`),
   - `__main__.py` - delegates to the CLI for `python -m coconet`.
+- `coconet_assistant/` - optional manager chat tools (scenario build/validate, ensembles, summaries).
+- `app.py` - Streamlit UI for the assistant (`pip install 'coconet-python[assistant]'`).
 
 ## Running with uv (from a git checkout)
 
