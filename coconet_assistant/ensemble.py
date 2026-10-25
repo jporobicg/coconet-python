@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import shutil
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from coconet.api import run_coconet
+from coconet.config import effective_ensemble_workers
 
 from coconet_assistant.cache import load_cached_run, run_cache_key, save_cached_run
 from coconet_assistant.scenario import (
@@ -22,6 +24,39 @@ from coconet_assistant.scenario import (
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 LOGGER = logging.getLogger(__name__)
+
+# Measured on the full GBR network (reefs2024.csv, 3,805 reefs) on a 40-core workstation:
+# the serial ensemble-0 spinup and one simulation ensemble-year (ensembles in parallel).
+SECONDS_PER_SPINUP_YEAR = 85.0
+SECONDS_PER_ENSEMBLE_YEAR = 160.0
+
+
+def estimate_run_seconds(
+    config: dict[str, Any],
+    *,
+    include_baseline: bool,
+    spinup_cached: bool,
+    cpu_count: int | None = None,
+) -> float:
+    """Rough wall-clock estimate for a scenario (and its baseline) on the full GBR.
+
+    The baseline shares the scenario's spinup, so only the first run pays for it.
+    """
+    runs = int(config["ensemble_runs"])
+    workers = effective_ensemble_workers(int(config.get("ensemble_threads", 0)), runs)
+    if cpu_count is not None:
+        workers = max(1, min(workers, cpu_count))
+    waves = math.ceil(runs / workers)
+    years = int(config["end_year"]) - int(config["start_year"]) + 1
+    per_run = waves * years * SECONDS_PER_ENSEMBLE_YEAR
+    spinup = (
+        0.0
+        if spinup_cached
+        else (int(config["spinup_backtrack_years"]) + 1) * (SECONDS_PER_SPINUP_YEAR)
+    )
+    return spinup + per_run * (2 if include_baseline else 1)
+
+
 _PROGRESS_RE = re.compile(r"Progress:\s*ensemble=(?P<ensemble>\S+)\s+year=(?P<year>\S+)")
 
 
@@ -35,6 +70,7 @@ class EnsembleProgressHandler(logging.Handler):
         ensemble_runs: int,
         start_year: int,
         end_year: int,
+        spinup_years: int = 0,
     ) -> None:
         super().__init__(level=logging.INFO)
         self.callback = callback
@@ -42,7 +78,8 @@ class EnsembleProgressHandler(logging.Handler):
         self.start_year = start_year
         self.end_year = end_year
         year_span = max(end_year - start_year + 1, 1)
-        self.expected_steps = self.ensemble_runs * year_span
+        # Ensemble-0 spinup also logs one progress line per year.
+        self.expected_steps = self.ensemble_runs * year_span + max(spinup_years, 0)
         self.seen = 0
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -82,11 +119,18 @@ def run_ensemble(
     run_name: str | None = None,
     progress_callback: ProgressCallback | None = None,
     runner: Callable[..., Any] | None = None,
+    spinup_checkpoint: Any | None = None,
+    spinup_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a validated scenario as an ensemble (never a single stochastic replicate).
 
     ``confirmed`` must be true: the manager has to accept the proposed settings
     before the model starts. Completed runs are cached under ``cache_dir``.
+
+    ``spinup_checkpoint`` skips the ensemble-0 spinup (the caller guarantees the
+    runs are identical up to ``start_year``). When ``spinup_sink`` is given, the
+    run's own checkpoint is stored in it under ``"checkpoint"`` (``None`` for a
+    cached run). It is kept out of the returned payload, which the LLM sees.
     """
 
     if not confirmed:
@@ -146,12 +190,20 @@ def run_ensemble(
         ensemble_runs=int(fields_for_run["ensemble_runs"]),
         start_year=int(fields_for_run["start_year"]),
         end_year=int(fields_for_run["end_year"]),
+        spinup_years=(
+            0
+            if spinup_checkpoint is not None
+            else int(fields_for_run["spinup_backtrack_years"]) + 1
+        ),
     )
     model_logger = logging.getLogger("coconet.model")
     model_logger.addHandler(handler)
     execute = runner if runner is not None else run_coconet
+    extra = {"spinup_checkpoint": spinup_checkpoint} if spinup_checkpoint is not None else {}
     try:
-        result = execute(cfg, configure_logs=False)
+        result = execute(cfg, configure_logs=False, **extra)
+        if spinup_sink is not None:
+            spinup_sink["checkpoint"] = getattr(result, "spinup_checkpoint", None)
         output_file = getattr(result, "output_file", str(output_path))
         if Path(output_file) != output_path and Path(output_file).is_file():
             shutil.copyfile(output_file, output_path)
@@ -184,6 +236,7 @@ def run_ensemble(
         "config": fields_for_run,
         "cached": False,
         "ensemble_runs": int(fields_for_run["ensemble_runs"]),
+        "spinup_reused": spinup_checkpoint is not None,
     }
     save_cached_run(cache_root, key, {k: v for k, v in payload.items() if k != "output_file"})
     return payload

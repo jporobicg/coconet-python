@@ -24,7 +24,6 @@ from typing import Any
 
 from coconet_assistant.agent import run_agent_turn
 from coconet_assistant.ollama_client import OllamaClient
-from coconet_assistant.options import REGION_BOUNDS
 from coconet_assistant.scenario import config_has_interventions
 from coconet_assistant.tools import AssistantStore, ToolDispatcher
 
@@ -81,7 +80,7 @@ CASES: list[tuple[str, str, Check]] = [
             seed_reefs=100,
             start_coral_seeding=2028,
             end_year=2060,
-            intervene_lat_max=REGION_BOUNDS["C"]["intervene_lat_max"],
+            intervene_region="C",
         ),
     ),
     (

@@ -69,6 +69,7 @@ def plot_series_payload(
         if traces:
             panels.append({"group": group, "traces": traces})
     return {
+        "n_ensembles": summary.get("n_ensembles"),
         "region": summary.get("region"),
         "region_label": summary.get("region_label") or "all reefs (GBR-wide)",
         "panels": panels,
@@ -79,13 +80,54 @@ def plot_series_payload(
     }
 
 
+PANEL_TITLES: dict[str, str] = {
+    "coral_total": "Total coral cover",
+    "coral_groups": "Coral cover by group",
+    "cots": "Crown-of-thorns starfish",
+    "fish": "Emperors and coral trout",
+    "other": "Other indicators",
+    "change_coral_total": "Change in total coral cover vs no intervention",
+    "change_S_manta": "Change in CoTS density vs no intervention",
+}
+PANEL_UNITS: dict[str, str] = {
+    "coral_total": "Coral cover (%)",
+    "coral_groups": "Coral cover (%)",
+    "cots": "CoTS per manta tow (model units)",
+    "fish": "Fish abundance (model units)",
+    "other": "Model units",
+    "change_coral_total": "Change in coral cover (percentage points)",
+    "change_S_manta": "Change in CoTS per manta tow",
+}
+COVER_PANELS = frozenset({"coral_total", "coral_groups", "change_coral_total"})
+SCENARIO_COLOUR = "#1f6fb4"
+BASELINE_COLOUR = "#7f7f7f"
+GROUP_COLOURS = ("#1f6fb4", "#e07b1a", "#2a9d5c", "#c23b3b", "#8a5fbf", "#0f9fb0")
+YEARS_BEFORE_INTERVENTION = 10
+
+
+def _short_label(trace: dict[str, Any], single_metric: bool) -> str | None:
+    if trace.get("is_difference"):
+        return "Paired change (each replicate minus its baseline twin)"
+    if single_metric:
+        return "No intervention (baseline)" if trace.get("is_baseline") else "With interventions"
+    if trace.get("is_baseline"):
+        return None  # explained once by a proxy legend entry
+    code = str(trace["metric"]).removeprefix("C_")
+    label = CORAL_GROUP_LABELS.get(code, str(trace["label"]))
+    return label[:1].upper() + label[1:]
+
+
 def render_plots(
     payload: dict[str, Any],
     output_dir: str | Path,
     *,
     stem: str = "scenario",
 ) -> list[str]:
-    """Write one PNG per panel. Returns paths. Requires matplotlib."""
+    """Write one PNG per panel. Returns paths. Requires matplotlib.
+
+    Cover is shown in %, the window starts a decade before the first intervention,
+    and the intervention start and the region are marked on every figure.
+    """
     try:
         import matplotlib
 
@@ -98,25 +140,81 @@ def render_plots(
 
     folder = Path(output_dir)
     folder.mkdir(parents=True, exist_ok=True)
+    effect_year = payload.get("effect_from_year")
+    first_year = effect_year - YEARS_BEFORE_INTERVENTION if effect_year else None
     paths: list[str] = []
     for panel in payload.get("panels") or []:
+        group = panel["group"]
+        scale = 100.0 if group in COVER_PANELS else 1.0
+        metrics = list(dict.fromkeys(t["metric"] for t in panel["traces"]))
+        single = len(metrics) == 1
         fig, ax = plt.subplots(figsize=(8, 4.5))
         for trace in panel["traces"]:
-            years = trace["years"]
-            mean = trace["mean"]
-            q10 = trace["q10"]
-            q90 = trace["q90"]
-            (line,) = ax.plot(years, mean, label=trace["label"])
-            ax.fill_between(years, q10, q90, color=line.get_color(), alpha=0.18)
+            keep = [
+                i for i, y in enumerate(trace["years"]) if first_year is None or y >= first_year
+            ]
+            years = [trace["years"][i] for i in keep]
+            mean = [scale * trace["mean"][i] for i in keep]
+            q10 = [scale * trace["q10"][i] for i in keep]
+            q90 = [scale * trace["q90"][i] for i in keep]
+            if single:
+                colour = BASELINE_COLOUR if trace.get("is_baseline") else SCENARIO_COLOUR
+            else:
+                colour = GROUP_COLOURS[metrics.index(trace["metric"]) % len(GROUP_COLOURS)]
+            if trace.get("is_difference"):
+                colour = SCENARIO_COLOUR
+            style = "--" if trace.get("is_baseline") else "-"
+            ax.plot(years, mean, style, color=colour, lw=2, label=_short_label(trace, single))
+            if single:
+                ax.fill_between(years, q10, q90, color=colour, alpha=0.15, lw=0)
+        if not single:
+            ax.plot(
+                [], [], "--", color="#555555", lw=1.5, label="Dashed: no intervention (baseline)"
+            )
+        if panel.get("kind") == "difference":
+            ax.axhline(0, color="#333333", lw=1)
+        if effect_year:
+            ax.axvline(effect_year, color="#333333", lw=1, ls=":")
+            ax.text(
+                effect_year,
+                0.5,
+                f" Interventions start ({effect_year}) ",
+                transform=ax.get_xaxis_transform(),
+                rotation=90,
+                ha="right",
+                va="center",
+                fontsize=8,
+                color="#333333",
+            )
         ax.set_xlabel("Year")
-        ax.set_ylabel(panel["group"].replace("_", " "))
-        title = panel["group"].replace("_", " ").title()
-        ax.set_title(f"{title} — {payload.get('region_label', 'all reefs (GBR-wide)')}")
-        ax.legend(fontsize=8, loc="best")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        path = folder / f"{stem}_{panel['group']}.png"
-        fig.savefig(path, dpi=120)
+        ax.set_ylabel(PANEL_UNITS.get(group, group))
+        ax.set_title(
+            f"{PANEL_TITLES.get(group, group)} \u2014 {payload.get('region_label', 'all reefs')}",
+            fontsize=11,
+        )
+        ax.legend(fontsize=8, loc="best", frameon=False)
+        ax.grid(True, alpha=0.25)
+        if panel.get("kind") == "difference":
+            fig.text(
+                0.01,
+                0.01,
+                "Each replicate is compared with its baseline twin (same random seeds). "
+                "Shading: 10-90% range of those paired changes; above 0 = higher than baseline.",
+                fontsize=7,
+                color="#555555",
+            )
+        elif single:
+            fig.text(
+                0.01,
+                0.01,
+                f"Lines: mean of {payload.get('n_ensembles', 'all')} replicates. "
+                "Shading: 10-90% range across replicates.",
+                fontsize=7,
+                color="#555555",
+            )
+        fig.tight_layout(rect=(0, 0.03, 1, 1))
+        path = folder / f"{stem}_{group}.png"
+        fig.savefig(path, dpi=130)
         plt.close(fig)
         paths.append(str(path))
     return paths
@@ -129,8 +227,31 @@ def plot_results(
     output_dir: str | Path | None = None,
     groups: list[str] | None = None,
     stem: str = "scenario",
+    effect_from_year: int | None = None,
+    differences: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     payload = plot_series_payload(summary, baseline=baseline, groups=groups)
+    payload["effect_from_year"] = effect_from_year
+    for metric, rows in (differences or {}).items():
+        if not rows:
+            continue
+        payload["panels"].append(
+            {
+                "group": f"change_{metric}",
+                "kind": "difference",
+                "traces": [
+                    {
+                        "metric": metric,
+                        "label": f"{_metric_label(metric)} change vs baseline",
+                        "years": [row["year"] for row in rows],
+                        "mean": [row["mean"] for row in rows],
+                        "q10": [row["q10"] for row in rows],
+                        "q90": [row["q90"] for row in rows],
+                        "is_difference": True,
+                    }
+                ],
+            }
+        )
     paths: list[str] = []
     if output_dir is not None:
         try:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
 from coconet_assistant.agent import run_agent_turn
@@ -15,11 +18,14 @@ from coconet_assistant.ollama_client import (
 )
 from coconet_assistant.prompts import SYSTEM_PROMPT
 from coconet_assistant.scenario import display_settings
+from coconet_assistant.summarise import FACT_METRICS, format_metric
 from coconet_assistant.tools import AssistantStore, ToolDispatcher
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_REEFS = REPO_ROOT / "legacy" / "reefs2024.csv"
 DEFAULT_COAST = REPO_ROOT / "legacy" / "coastline.csv"
+POLL_SECONDS = 3
+VERDICTS = {"better": "Clear improvement", "worse": "Clear deterioration", "unclear": "Not clear"}
 
 
 def _init_state() -> None:
@@ -33,10 +39,8 @@ def _init_state() -> None:
         st.session_state.messages = []
     if "agent_history" not in st.session_state:
         st.session_state.agent_history = []
-    if "progress" not in st.session_state:
-        st.session_state.progress = None
-    if "last_plots" not in st.session_state:
-        st.session_state.last_plots = []
+    if "job" not in st.session_state:
+        st.session_state.job = None
     if "ollama_error" not in st.session_state:
         st.session_state.ollama_error = None
 
@@ -48,6 +52,14 @@ def _client() -> OllamaClient:
     )
 
 
+def _duration(seconds: float) -> str:
+    if seconds < 90:
+        return "about a minute"
+    if seconds < 3600:
+        return f"about {round(seconds / 60)} minutes"
+    return f"about {seconds / 3600:.1f} hours"
+
+
 def _render_settings(scenario_id: str) -> None:
     store: AssistantStore = st.session_state.store
     spec = store.scenarios.get(scenario_id)
@@ -55,103 +67,161 @@ def _render_settings(scenario_id: str) -> None:
         return
     st.subheader("Proposed settings")
     st.caption("These values will be sent to CoCoNet if you confirm. Nothing has been run yet.")
-    rows = display_settings(spec.config)
-    st.dataframe(
-        [
-            {
-                "Setting": row["label"],
-                "Field": row["field"],
-                "Value": row["value"],
-                "Model default": row["default"],
-            }
-            for row in rows
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
-    for note in spec.notes:
-        st.info(note)
+    rows = [
+        {
+            "Setting": row["label"],
+            "Field": row["field"],
+            "Value": row["value"],
+            "Model default": row["default"],
+        }
+        for row in display_settings(spec.config)
+        if row["field"] not in {"reefs_file", "coastline_file"}
+    ]
+    # Tall enough to show every row: the start years must never hide behind a scroll bar.
+    st.dataframe(rows, hide_index=True, use_container_width=True, height=36 * (len(rows) + 1) + 4)
+    replaced = [note for note in spec.notes if "was not in your request" in note]
+    other = [note for note in spec.notes if note not in replaced]
+    if other:
+        st.info("**How these settings were chosen**\n\n" + "\n".join(f"- {n}" for n in other))
+    if replaced:
+        st.warning(
+            "**Values the assistant proposed that you did not give** (defaults used instead)"
+            "\n\n" + "\n".join(f"- {n}" for n in replaced)
+        )
+
+    plan = ToolDispatcher(store).run_plan(scenario_id)
+    if plan["cached"] and plan["baseline_cached"]:
+        st.success("These runs are already computed. Results will load immediately.")
+    else:
+        shared = " The baseline reuses the scenario's spin-up." if plan["spinup_shared"] else ""
+        st.warning(
+            f"Estimated run time on this machine: {_duration(plan['estimate_seconds'])} "
+            f"for the scenario and its no-intervention baseline.{shared} The run continues "
+            "if you close this tab; ask the same question again later to load the results."
+        )
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("Confirm and run ensemble", type="primary"):
-            _run_confirmed(scenario_id)
+            _start_job(scenario_id)
     with col_b:
         if st.button("Cancel proposal"):
             store.last_validated_id = None
             st.rerun()
 
 
-def _run_confirmed(scenario_id: str) -> None:
+def _start_job(scenario_id: str) -> None:
+    """Run the confirmed scenario and its baseline in a background thread.
+
+    The thread keeps running if the browser tab closes; finished runs land in the
+    disk cache, so asking again later loads them.
+    """
     store: AssistantStore = st.session_state.store
     store.mark_confirmed(scenario_id)
-    tools = ToolDispatcher(store)
-    progress_box = st.empty()
+    job: dict[str, Any] = {"scenario_id": scenario_id, "progress": None, "done": False}
 
-    def _progress(payload: dict) -> None:
-        st.session_state.progress = payload
-        fraction = float(payload.get("fraction") or 0)
-        progress_box.progress(min(max(fraction, 0.0), 1.0), text=payload.get("message", ""))
+    def work() -> None:
+        # Streamlit calls are not allowed from this thread: only update ``job``.
+        store.progress_hook = lambda payload: job.update(progress=payload)
+        try:
+            job["payload"] = ToolDispatcher(store).call(
+                "run_ensemble", {"scenario_id": scenario_id, "include_baseline": True}
+            )
+        except Exception as exc:  # reported to the manager, never swallowed
+            job["payload"] = {"ok": False, "errors": [str(exc)]}
+        finally:
+            store.progress_hook = None
+            job["done"] = True
 
-    store.progress_hook = _progress
-    try:
-        run_payload = tools.call(
-            "run_ensemble",
-            {"scenario_id": scenario_id, "confirmed": True, "include_baseline": True},
-        )
-    except Exception as exc:
-        st.error(str(exc))
-        store.progress_hook = None
-        return
-    store.progress_hook = None
-    if not run_payload.get("ok"):
-        st.error("; ".join(run_payload.get("errors") or ["Run failed."]))
-        return
-
-    result = run_payload["result"]
-    run_id = result["run"]["run_id"]
-    summary = tools.call("summarise_results", {"run_id": run_id})
-    plot_args = {"run_id": run_id}
-    compare_args = {"run_ids": [run_id]}
-    if result.get("baseline_run"):
-        base_id = result["baseline_run"]["run_id"]
-        tools.call("summarise_results", {"run_id": base_id})
-        plot_args["baseline_run_id"] = base_id
-        compare_args["run_ids"].append(base_id)
-        compare_args["baseline_run_id"] = base_id
-    plot_payload = tools.call("plot", plot_args)
-    compare_payload = None
-    if len(compare_args["run_ids"]) > 1:
-        compare_payload = tools.call("compare_scenarios", compare_args)
-
-    figures = []
-    if plot_payload.get("ok"):
-        figures = plot_payload["result"].get("figure_paths") or []
-    st.session_state.last_plots = figures
-
-    explanation = _explain_results(
-        {
-            "run": run_payload,
-            "summary": summary,
-            "plot": plot_payload,
-            "comparison": compare_payload,
-        }
-    )
-    st.session_state.messages.append(
-        {"role": "assistant", "content": explanation, "plots": figures}
-    )
+    threading.Thread(target=work, name=f"coconet-{scenario_id}", daemon=True).start()
+    st.session_state.job = job
     store.last_validated_id = None
-    progress_box.progress(1.0, text="Finished")
     st.rerun()
 
 
-def _explain_results(payload: dict) -> str:
-    facts = []
-    summary = (payload.get("summary") or {}).get("result") or {}
-    facts.extend(summary.get("facts") or [])
-    comparison = (payload.get("comparison") or {}).get("result") or {}
-    facts.extend(comparison.get("facts") or [])
-    suggestions = comparison.get("suggestions") or []
-    caveats = summary.get("caveats") or comparison.get("caveats") or []
+def _render_job(job: dict[str, Any]) -> None:
+    progress = job.get("progress") or {}
+    fraction = min(max(float(progress.get("fraction") or 0.0), 0.0), 1.0)
+    st.progress(fraction, text=progress.get("message") or "Starting the ensemble...")
+    st.caption(
+        "CoCoNet is running the scenario and its no-intervention baseline. "
+        "You can close this tab; the results are cached when the run finishes."
+    )
+    time.sleep(POLL_SECONDS)
+    st.rerun()
+
+
+def _results_table(comparison: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rows for the manager: levels, paired change, and its verdict. Numbers from tools."""
+    baseline = comparison["baseline"]
+    year = comparison.get("end_year")
+    table = []
+    for row in comparison["rows"]:
+        metric = row["metric"]
+        if metric not in FACT_METRICS:
+            continue
+        for name, value in row["values"].items():
+            paired = value.get("paired")
+            if name == baseline or paired is None:
+                continue
+            base = row["values"].get(baseline, {})
+            table.append(
+                {
+                    "Indicator": row["label"],
+                    f"With interventions ({year})": format_metric(metric, value["mean"]),
+                    f"No intervention ({year})": format_metric(metric, base.get("mean", 0.0)),
+                    "Paired change": format_metric(metric, paired["mean"], signed=True),
+                    "10-90% of paired changes": (
+                        f"{format_metric(metric, paired['q10'], signed=True)} to "
+                        f"{format_metric(metric, paired['q90'], signed=True)}"
+                    ),
+                    "Replicates better": f"{paired['n_better']} of {paired['n_pairs']}",
+                    "Verdict": VERDICTS[paired["direction"]],
+                }
+            )
+    return table
+
+
+def _finish_job(job: dict[str, Any]) -> None:
+    st.session_state.job = None
+    payload = job.get("payload") or {}
+    if not payload.get("ok"):
+        message = "; ".join(payload.get("errors") or ["Run failed."])
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"The run did not complete: {message}"}
+        )
+        return
+    result = payload["result"]
+    run_id = result["run"]["run_id"]
+    base_id = result["baseline_run"]["run_id"]
+    with st.spinner("Summarising the ensemble..."):
+        sections = ToolDispatcher(st.session_state.store).report(run_id, base_id)
+    explanation = _explain_results(sections)
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": explanation,
+            "sections": [
+                {
+                    "title": section["region_label"],
+                    "table": _results_table(section["comparison"]),
+                    "plots": section["figure_paths"],
+                }
+                for section in sections
+            ],
+        }
+    )
+    st.rerun()
+
+
+def _explain_results(sections: list[dict[str, Any]]) -> str:
+    facts: list[str] = []
+    suggestions: list[str] = []
+    caveats: list[str] = []
+    for section in sections:
+        comparison = section["comparison"]
+        facts.extend(comparison.get("facts") or [])
+        suggestions.extend(s for s in comparison.get("suggestions") or [] if s not in suggestions)
+        caveats = comparison.get("caveats") or caveats
     try:
         response = _client().chat(
             [
@@ -160,14 +230,11 @@ def _explain_results(payload: dict) -> str:
                     "role": "user",
                     "content": (
                         "Write a short manager briefing using ONLY these tool facts. "
-                        "Do not add numbers that are not listed.\n\n"
+                        "Lead with the targeted region, then the whole GBR. Say which "
+                        "changes are clear and which are within replicate noise. Do not "
+                        "add numbers that are not listed.\n\n"
                         + json.dumps(
-                            {
-                                "facts": facts,
-                                "suggestions": suggestions,
-                                "caveats": caveats,
-                                "rubble_note": summary.get("rubble_note"),
-                            },
+                            {"facts": facts, "suggestions": suggestions, "caveats": caveats},
                             default=str,
                         )
                     ),
@@ -175,7 +242,7 @@ def _explain_results(payload: dict) -> str:
             ],
             tools=None,
         )
-        return response.content or "\n".join(facts)
+        return response.content or "\n\n".join(facts)
     except OllamaNotAvailable:
         blocks = ["**Results (from the model tools)**", *facts]
         if suggestions:
@@ -190,15 +257,16 @@ def _handle_chat(user_text: str) -> None:
     store: AssistantStore = st.session_state.store
     lowered = user_text.strip().lower()
     if lowered in {"yes", "y", "confirm", "run", "run it", "go"} and store.last_validated_id:
-        _run_confirmed(store.last_validated_id)
+        _start_job(store.last_validated_id)
         return
     try:
-        turn = run_agent_turn(
-            _client(),
-            store,
-            user_text,
-            history=st.session_state.agent_history,
-        )
+        with st.spinner("The assistant is preparing a scenario..."):
+            turn = run_agent_turn(
+                _client(),
+                store,
+                user_text,
+                history=st.session_state.agent_history,
+            )
     except OllamaNotAvailable as exc:
         st.session_state.ollama_error = str(exc)
         st.session_state.messages.append({"role": "assistant", "content": str(exc)})
@@ -245,6 +313,21 @@ def _sidebar() -> None:
             st.sidebar.write(f"- `{run['run_id']}` — {run.get('name')}")
 
 
+def _render_message(message: dict[str, Any]) -> None:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        for section in message.get("sections") or []:
+            st.markdown(f"#### Results: {section['title']}")
+            if section["table"]:
+                st.dataframe(section["table"], hide_index=True, use_container_width=True)
+            plots = [p for p in section["plots"] if Path(p).is_file()]
+            for left, right in zip(plots[::2], [*plots[1::2], None], strict=False):
+                cols = st.columns(2)
+                cols[0].image(left)
+                if right:
+                    cols[1].image(right)
+
+
 def main() -> None:
     ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
     ## ~ Manager chat workspace ~ ##
@@ -266,20 +349,18 @@ def main() -> None:
 
     store: AssistantStore = st.session_state.store
     for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            for path in message.get("plots") or []:
-                if Path(path).is_file():
-                    st.image(path)
+        _render_message(message)
+
+    job = st.session_state.job
+    if job is not None:
+        if job["done"]:
+            _finish_job(job)
+        else:
+            _render_job(job)
+        return
 
     if store.last_validated_id:
         _render_settings(store.last_validated_id)
-
-    if st.session_state.last_plots:
-        st.subheader("Latest plots")
-        for path in st.session_state.last_plots:
-            if Path(path).is_file():
-                st.image(path)
 
     prompt = st.chat_input(
         'Example: "What if we control CoTS in the northern sector and seed '

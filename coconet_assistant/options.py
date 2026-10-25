@@ -37,6 +37,9 @@ SSP_ALIASES: dict[str, float] = {
     "ssp8.5": 8.5,
 }
 
+# Region codes that limit box-based interventions (CoconetConfig.intervene_region).
+REGION_FILTER_CODES: tuple[str, ...] = ("FN", "N", "C", "S")
+
 # Simulation timing fields the language model may not change (see ToolDispatcher).
 SIMULATION_TIMING_FIELDS: tuple[str, ...] = (
     "start_year",
@@ -143,16 +146,16 @@ CORAL_GROUP_LABELS: dict[str, str] = {
 # Output columns the assistant can summarise. Rubble (R_reef) is simulated
 # but is not written to the standard output CSV.
 OUTPUT_METRICS: dict[str, str] = {
-    "coral_total": "Sum of C_sa + C_ta + C_mo + C_po + C_fa + C_tt (fractional cover)",
+    "coral_total": "Total coral cover (all six groups)",
     "C_sa": "Staghorn Acropora reef-mean cover",
     "C_ta": "Tabular Acropora reef-mean cover",
     "C_mo": "Montipora reef-mean cover",
     "C_po": "Poritidae reef-mean cover",
     "C_fa": "Faviid reef-mean cover",
-    "C_tt": "Thermally tolerant reef-mean cover",
-    "S_manta": "Reef-mean CoTS density (manta-tow equivalent)",
-    "emperor": "Sum of emperor age classes E_1 ... E_5",
-    "trout": "Sum of coral-trout age classes G_1 ... G_5",
+    "C_tt": "Thermally tolerant coral cover",
+    "S_manta": "CoTS density (manta-tow equivalent)",
+    "emperor": "Emperor fish (all age classes)",
+    "trout": "Coral trout (all age classes)",
     "Triggerfish": "Triggerfish density",
     "Benthic_invert": "Benthic invertebrate density",
     "DHW": "Degree heating weeks (bleaching driver)",
@@ -197,6 +200,7 @@ FIELD_LABELS: dict[str, str] = {
     "intervene_lon_max": "Maximum longitude of interventions",
     "intervene_lat_min": "Minimum latitude of interventions",
     "intervene_lat_max": "Maximum latitude of interventions",
+    "intervene_region": "Region of seeding, shading, and other reef interventions",
     "start_rubble_consolidation": "Rubble consolidation start year",
     "consolidation_reefs": "Annual number of consolidated reefs",
     "consolidation_threshold": "Minimum rubble cover threshold for consolidation [0 1]",

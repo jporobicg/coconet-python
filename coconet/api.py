@@ -15,7 +15,7 @@ from typing import Any
 
 from coconet.config import CoconetConfig
 from coconet.logging_utils import configure_logging
-from coconet.model import CoconetModel
+from coconet.model import CoconetModel, SpinupCheckpoint
 
 __all__ = [
     "CoconetRunResult",
@@ -43,6 +43,9 @@ class CoconetRunResult:
     """Outcome of :func:`run_coconet` (extend with metrics later if needed)."""
 
     output_file: str
+    # State after the ensemble-0 spinup; pass it to another run whose settings are
+    # identical up to start_year (e.g. a no-intervention baseline) to skip its spinup.
+    spinup_checkpoint: SpinupCheckpoint | None = None
 
 
 def load_coconet_config(
@@ -85,11 +88,20 @@ def run_coconet(
     *,
     configure_logs: bool = False,
     log_level: str | None = None,
+    spinup_checkpoint: SpinupCheckpoint | None = None,
 ) -> CoconetRunResult:
     """Run the simulation for ``config`` and return basic result metadata.
 
     ``configure_logs``: when true, call :func:`~coconet.logging_utils.configure_logging`
     using ``log_level`` if set, otherwise ``config.log_level``.
+
+    ``spinup_checkpoint``: the ``spinup_checkpoint`` of an earlier result. The caller
+    must ensure both runs are identical up to ``start_year`` (same reefs, climate,
+    biology, and no intervention starting before ``start_year``); the spinup is then
+    skipped and the output is the same as a full run.
+
+    Parallel ensembles use the ``spawn`` start method, so scripts that call this
+    function must guard their entry point with ``if __name__ == "__main__":``.
 
     Idiomatic logging for library embedders: set ``configure_logs=False`` and configure
     the standard logging module (or your framework's logging) yourself before calling.
@@ -104,7 +116,10 @@ def run_coconet(
         config.coastline_file,
         config.output_file,
     )
-    model = CoconetModel(config)
+    model = CoconetModel(config, spinup_checkpoint=spinup_checkpoint)
     model.run()
     logger.debug("CoCoNet run finished: output_file=%s", config.output_file)
-    return CoconetRunResult(output_file=config.output_file)
+    return CoconetRunResult(
+        output_file=config.output_file,
+        spinup_checkpoint=model.spinup_checkpoint_out,
+    )

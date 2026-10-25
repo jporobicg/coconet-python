@@ -23,14 +23,22 @@ def find_table_header_row(path: Path) -> int:
     )
 
 
-def read_output_table(path: str | Path) -> pd.DataFrame:
-    """Load reef-year rows, skipping the legacy metadata preamble."""
+def read_output_table(path: str | Path, columns: list[str] | None = None) -> pd.DataFrame:
+    """Load reef-year rows, skipping the legacy metadata preamble.
+
+    ``columns`` limits the read to those columns (plus Ensemble, Year, Region); a
+    full GBR output has millions of rows, so this saves time and memory.
+    """
     output_path = Path(path)
     if not output_path.is_file():
         raise FileNotFoundError(f"Output file not found: {output_path}")
 
     header_row = find_table_header_row(output_path)
-    frame = pd.read_csv(output_path, skiprows=header_row)
+    usecols = None
+    if columns is not None:
+        wanted = {"Ensemble", "Year", "Region", *columns}
+        usecols = lambda name: str(name).strip() in wanted  # noqa: E731
+    frame = pd.read_csv(output_path, skiprows=header_row, usecols=usecols)
     frame.columns = [str(col).strip() for col in frame.columns]
     if "Ensemble" not in frame.columns or "Year" not in frame.columns:
         raise ValueError(f"Output table is missing Ensemble/Year columns: {output_path}")

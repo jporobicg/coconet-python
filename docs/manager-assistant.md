@@ -140,7 +140,40 @@ Every summary, comparison, and plot states which reefs it covers: all reefs
 region, and a comparison never mixes regions.
 
 Reported series: total coral cover (sum of the six groups), each group,
-`S_manta` (CoTS), emperors (`E_1`…`E_5`), coral trout (`G_1`…`G_5`).
+`S_manta` (CoTS), emperors (`E_1`…`E_5`), coral trout (`G_1`…`G_5`). Cover is
+shown in %, from ten years before the first intervention, with its start marked.
+
+## How results are compared
+
+After a run the app reports the region(s) the interventions target first, then
+all reefs. A regional effect averaged over the whole GBR is often lost in noise.
+
+Scenario and baseline use the same random seeds and are identical before the
+first intervention. So each replicate is compared with its own baseline twin
+(ensemble *i* minus ensemble *i*). For each indicator the app shows:
+
+- the level in the final year with and without interventions;
+- the mean paired change and the 10–90% range of the paired changes;
+- how many replicates did better than their baseline twin;
+- a verdict: **clear** only when the 10–90% range of paired changes excludes zero,
+  otherwise "not clear" (within replicate noise).
+
+The "change vs no intervention" plots show the same paired change over time.
+Suggestions for the next scenario use these verdicts, so a difference inside
+the noise is never called an improvement.
+
+## Run time
+
+The full GBR network costs about 85 s per spin-up year and about 160 s per
+simulated year (replicates in parallel) on a 40-core workstation. With the
+default timing (1956–2050, 50-year spin-up) one question takes roughly 9–10
+hours for the scenario and its baseline. The confirmation card shows an estimate
+for the current machine, or that the runs are already cached.
+
+The baseline reuses the scenario's ensemble-0 spin-up, and the spin-up is saved
+under the cache directory, so later questions with the same climate skip it too.
+Runs continue in the background if the browser tab is closed; asking the same
+question again loads the cached results.
 
 ## Limitations
 
@@ -152,12 +185,13 @@ Reported series: total coral cover (sum of the six groups), each group,
 - Rubble is simulated (`R_site` / `R_reef`) and rubble consolidation can run,
   but rubble is **not** written to `output.csv`, so the assistant will not
   invent a rubble trend.
-- Most spatial interventions treat reefs in priority order inside a lat/lon
-  box. CoTS regional control uses Region codes (`FN`, `N`, `C`, `S`, `GBR`)
-  instead. Named-region boxes used for seeding are a coarse split, not official
-  GBRMPA polygons.
-- A full GBR ensemble is a heavy run. Start with 20 replicates and a shorter
-  end year if you are testing the app. Cached repeats are instant.
+- Spatial interventions treat reefs in priority order. When the manager names a
+  region, every lever uses the reefs' own Region codes (`intervene_region` for
+  seeding, shading, and similar, `CoTS_vessels_*` for CoTS control), so a package
+  targets the same reefs. These are the model's GBRMPA region codes.
+- A full GBR ensemble is a heavy run (see Run time). Cached repeats are instant.
+- Values the manager did not give (vessel counts, reefs, hectares, thresholds,
+  end year) are replaced by documented defaults, and the card lists them.
 
 ## Tests
 

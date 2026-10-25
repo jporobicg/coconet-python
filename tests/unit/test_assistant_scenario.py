@@ -35,6 +35,14 @@ def test_list_options_uses_real_config_fields() -> None:
     assert options["intervention_types"]["cots_control"]["fields"][0] == "start_CoTS_control"
 
 
+def test_fractions_must_be_between_zero_and_one() -> None:
+    with pytest.raises(ScenarioValidationError, match="seed_threshold is a fraction"):
+        build_scenario(
+            climate="4.5",
+            interventions=[{"type": "coral_seeding", "start_year": 2030, "threshold": 20}],
+        )
+
+
 def test_whole_reef_region_aliases() -> None:
     spec = build_scenario(
         climate="SSP2-4.5",
@@ -73,7 +81,7 @@ def test_build_northern_cots_and_seeding() -> None:
     assert spec.config["seed_hectares"] > 0
     assert spec.config["seed_threshold"] > 0
     assert spec.config["end_year"] >= 2050
-    assert spec.config["intervene_lat_max"] <= -13.0
+    assert spec.config["intervene_region"] == "N"
     validate_scenario(spec)
 
 

@@ -49,9 +49,29 @@ cfg = load_coconet_config(
     scenario={"ensemble_runs": 3},
     output_file="runs/my_run.csv",
 )
-result = run_coconet(cfg, configure_logs=True)
-print(result.output_file)
+if __name__ == "__main__":  # required: parallel ensembles use the "spawn" start method
+    result = run_coconet(cfg, configure_logs=True)
+    print(result.output_file)
 ```
+
+Parallel simulation ensembles start fresh worker processes (`spawn`), which re-import
+your script. Without the `if __name__ == "__main__":` guard the script fails when the
+workers start, which is only after the full ensemble-0 spinup.
+
+### Reusing a spinup
+
+`run_coconet` returns the state after the ensemble-0 spinup as
+`result.spinup_checkpoint`. A second run whose settings are identical up to
+`start_year` (same reefs, climate, and biology, with no intervention starting before
+`start_year`) can start from it and skip its own spinup:
+
+```python
+scenario = run_coconet(scenario_cfg)
+baseline = run_coconet(baseline_cfg, spinup_checkpoint=scenario.spinup_checkpoint)
+```
+
+The output is identical to a full run. The caller is responsible for checking that the
+two configurations really match up to `start_year`.
 
 ### Logging
 

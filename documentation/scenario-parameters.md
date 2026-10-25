@@ -80,6 +80,12 @@ Applied to most spatial interventions (not CoTS regional control, which uses ree
 | Maximum longitude of interventions | `intervene_lon_max` |
 | Minimum latitude of interventions | `intervene_lat_min` |
 | Maximum latitude of interventions | `intervene_lat_max` |
+| Region of interventions (Python only; written to the preamble only when set) | `intervene_region` |
+
+`intervene_region` adds a Region-code test (`FN`, `N`, `C`, `S`) on top of the box. Lat/lon
+boxes overlap the GBRMPA regions (for example, a box around the Northern region also
+holds many Far-Northern reefs), so use the Region code when an intervention should
+target one region exactly. The default `"GBR"` disables the test.
 
 ## Rubble, coral seeding, slicks, local shading, ocean acidification
 

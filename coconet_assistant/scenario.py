@@ -13,7 +13,7 @@ from coconet_assistant.options import (
     FIELD_LABELS,
     INTERVENTION_START_FIELDS,
     INTERVENTION_TYPES,
-    REGION_BOUNDS,
+    REGION_FILTER_CODES,
     SUPPORTED_SSP,
     VESSEL_FIELDS,
     config_field_names,
@@ -49,6 +49,20 @@ DEFAULT_PH_REEFS = 50
 DEFAULT_PH_PROTECTION = 0.30
 DEFAULT_RELEASE_NUMBER = 100.0
 DEFAULT_REZONED_REEFS = 50
+
+# Config fields that are fractions or cover proportions in [0, 1].
+FRACTION_FIELDS: tuple[str, ...] = (
+    "seed_threshold",
+    "slick_threshold",
+    "consolidation_threshold",
+    "hybrid_fraction",
+    "dominance",
+    "catch_reduction",
+    "reef_shading_reduction",
+    "regional_shading_reduction",
+    "pH_protection",
+    "coral_threshold",
+)
 
 # Paths and logging are not part of the scientific scenario identity.
 NON_SCENARIO_FIELDS = frozenset(
@@ -361,11 +375,13 @@ def build_scenario(
             raise ScenarioValidationError(
                 [f"Unknown region {region!r}. Use GBR, FN, N, C, S, or sector."]
             )
-        if apply_region_bounds and region_code in REGION_BOUNDS:
-            config.update(REGION_BOUNDS[region_code])
+        if apply_region_bounds and region_code in REGION_FILTER_CODES:
+            # Use the reefs' own Region codes (as CoTS control does) rather than a
+            # lat/lon box, so every lever in a package targets the same reefs.
+            config["intervene_region"] = region_code
             notes.append(
-                f"Intervention bounding box set to the approximate {region_code} region. "
-                "This is a coarse lat/lon split, not an official GBRMPA polygon."
+                f"Seeding, shading, and other reef interventions are limited to reefs in "
+                f"the {region_code} region (the model's own Region codes, as for CoTS control)."
             )
 
     for item in intervention_list:
@@ -499,6 +515,17 @@ def validate_scenario(config: dict[str, Any] | ScenarioSpec) -> dict[str, Any]:
     ):
         errors.append("intervene_lat_min must be < intervene_lat_max.")
 
+    for name in FRACTION_FIELDS:
+        value = coerced.get(name)
+        if isinstance(value, (int, float)) and not 0.0 <= float(value) <= 1.0:
+            errors.append(
+                f"{name} is a fraction between 0 and 1 (for example 0.3 for 30%). Got {value!r}."
+            )
+
+    region_filter = coerced.get("intervene_region")
+    if region_filter not in ("GBR", *REGION_FILTER_CODES):
+        errors.append(f"intervene_region must be GBR, FN, N, C, or S. Got {region_filter!r}.")
+
     if _is_active_start(coerced.get("start_CoTS_control")):
         vessels = [int(coerced.get(name, 0) or 0) for name in VESSEL_FIELDS]
         if not any(v > 0 for v in vessels):
@@ -590,9 +617,43 @@ def baseline_config(config: dict[str, Any]) -> dict[str, Any]:
         "reef_shading_reduction",
         "pH_reefs",
         "pH_protection",
+        "intervene_region",
     ):
         out[name] = defaults[name]
     return out
+
+
+def targeted_regions(config: dict[str, Any]) -> list[str]:
+    """Region codes a scenario's interventions are confined to (empty when GBR-wide)."""
+    codes: list[str] = []
+    for code in REGION_FILTER_CODES:
+        if int(config.get(f"CoTS_vessels_{code}", 0) or 0) > 0:
+            codes.append(code)
+    region = config.get("intervene_region")
+    if region in REGION_FILTER_CODES and region not in codes and config_has_interventions(config):
+        codes.append(str(region))
+    return codes
+
+
+def active_start_years(config: dict[str, Any]) -> list[int]:
+    """Start years of the interventions a config switches on."""
+    return [
+        int(config[name])
+        for name in INTERVENTION_START_FIELDS
+        if _is_active_start(config.get(name, INACTIVE_START_YEAR))
+    ]
+
+
+def spinup_shared_with_baseline(config: dict[str, Any]) -> bool:
+    """True when no intervention starts before ``start_year``.
+
+    The ensemble-0 spinup runs up to ``start_year``, so such a scenario and its
+    no-intervention baseline have identical spinups and can share one.
+    """
+    start = int(config["start_year"])
+    return all(
+        int(config.get(name, INACTIVE_START_YEAR)) > start for name in INTERVENTION_START_FIELDS
+    )
 
 
 def config_has_interventions(config: dict[str, Any]) -> bool:

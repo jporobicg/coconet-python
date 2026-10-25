@@ -85,6 +85,11 @@ Applied to most spatial interventions (see README / model for exceptions such as
 | `intervene_lon_max` | float | `155.0` |
 | `intervene_lat_min` | float | `-25.0` |
 | `intervene_lat_max` | float | `-9.0` |
+| `intervene_region` | str | `"GBR"` |
+
+`intervene_region` (Python-only) limits the same interventions to reefs whose own
+Region code is `FN`, `N`, `C`, or `S`, as CoTS regional control does. The default
+`"GBR"` applies no region filter, so output matches NetLogo.
 
 ### Stocking, shading, rubble, coral interventions
 

@@ -86,6 +86,9 @@ class CoconetConfig:
     intervene_lon_max: float = 155.0
     intervene_lat_min: float = -25.0
     intervene_lat_max: float = -9.0
+    # Region code (FN, N, C, S) that box-based interventions are limited to, on top of
+    # the lat/lon box. "GBR" (default) applies no region filter, as in NetLogo.
+    intervene_region: str = "GBR"
 
     start_modified_zoning: int = 9999
     rezoned_reefs: int = 0

@@ -59,9 +59,17 @@ class SpinupCheckpoint:
 class CoconetModel:
     """Python port of legacy CoCoNet NetLogo model."""
 
-    def __init__(self, config: CoconetConfig) -> None:
+    def __init__(
+        self,
+        config: CoconetConfig,
+        spinup_checkpoint: SpinupCheckpoint | None = None,
+    ) -> None:
         self.cfg = config
         self.rng = NetLogoRng(1)
+        # A checkpoint from an earlier run with the same pre-intervention settings skips
+        # the ensemble-0 spinup. ``spinup_checkpoint_out`` holds this run's checkpoint.
+        self.spinup_checkpoint_in = spinup_checkpoint
+        self.spinup_checkpoint_out: SpinupCheckpoint | None = None
 
         # Globals
         self.small = 0.000001
@@ -294,6 +302,11 @@ class CoconetModel:
             self._run_sequential_ensemble_loop(run_start)
 
     def _run_sequential_ensemble_loop(self, run_start: float) -> None:
+        if self.spinup_checkpoint_in is not None:
+            logger.info("Ensemble 0 (spinup) restored from a checkpoint.")
+            self.import_spinup_checkpoint(self.spinup_checkpoint_in)
+            self.spinup_checkpoint_out = self.spinup_checkpoint_in
+            self.ensemble = 1
         while self.ensemble <= self.cfg.ensemble_runs:
             ensemble_start = time.perf_counter()
             ensemble_kind = "spinup" if self.ensemble == 0 else "simulation"
@@ -312,6 +325,8 @@ class CoconetModel:
                 self.cfg.ensemble_runs,
                 time.perf_counter() - ensemble_start,
             )
+            if self.ensemble == 0:
+                self.spinup_checkpoint_out = self.export_spinup_checkpoint()
             self.ensemble += 1
         logger.info(
             "Run completed in %.2fs (output_file=%s final_ensemble=%s).",
@@ -322,23 +337,27 @@ class CoconetModel:
 
     def _run_with_parallel_simulation_ensembles(self, run_start: float, max_workers: int) -> None:
         self.ensemble = 0
-        ensemble_start = time.perf_counter()
-        logger.info(
-            "Ensemble %s/%s started (spinup).",
-            self.ensemble,
-            self.cfg.ensemble_runs,
-        )
-        self.initialise_run()
-        self._run_ensemble_year_steps()
-        self._maybe_write_priority_benefit()
-        logger.info(
-            "Ensemble %s/%s completed in %.2fs.",
-            self.ensemble,
-            self.cfg.ensemble_runs,
-            time.perf_counter() - ensemble_start,
-        )
-
-        checkpoint = self.export_spinup_checkpoint()
+        if self.spinup_checkpoint_in is not None:
+            logger.info("Ensemble 0 (spinup) restored from a checkpoint.")
+            checkpoint = self.spinup_checkpoint_in
+        else:
+            ensemble_start = time.perf_counter()
+            logger.info(
+                "Ensemble %s/%s started (spinup).",
+                self.ensemble,
+                self.cfg.ensemble_runs,
+            )
+            self.initialise_run()
+            self._run_ensemble_year_steps()
+            self._maybe_write_priority_benefit()
+            logger.info(
+                "Ensemble %s/%s completed in %.2fs.",
+                self.ensemble,
+                self.cfg.ensemble_runs,
+                time.perf_counter() - ensemble_start,
+            )
+            checkpoint = self.export_spinup_checkpoint()
+        self.spinup_checkpoint_out = checkpoint
         tmpdir = Path(tempfile.mkdtemp(prefix="coconet-ensemble-"))
         try:
             futures: dict[int, Future[None]] = {}
@@ -1694,6 +1713,8 @@ class CoconetModel:
             & (self.y > self.cfg.intervene_lat_min)
             & (self.y < self.cfg.intervene_lat_max)
         )
+        if self.cfg.intervene_region != "GBR":
+            mask &= self.region_name == self.cfg.intervene_region
         self.regional_shading[mask] = self.cfg.regional_shading_reduction
 
     def increase_pH(self) -> None:
@@ -2120,12 +2141,15 @@ class CoconetModel:
         return int(idxs[0])
 
     def _reef_in_intervention_bounds(self, reef_idx: int) -> bool:
-        return (
+        in_box = (
             self.x[reef_idx] > self.cfg.intervene_lon_min
             and self.x[reef_idx] < self.cfg.intervene_lon_max
             and self.y[reef_idx] > self.cfg.intervene_lat_min
             and self.y[reef_idx] < self.cfg.intervene_lat_max
         )
+        if self.cfg.intervene_region == "GBR":
+            return bool(in_box)
+        return bool(in_box) and self.region_name[reef_idx] == self.cfg.intervene_region
 
     def _projection_bleach_probability(self) -> float:
         if self.cfg.SSP == 1.9:
@@ -2193,6 +2217,9 @@ class CoconetModel:
         lines.append(f"Maximum longitude of interventions, {self.cfg.intervene_lon_max}")
         lines.append(f"Minimum latitude of interventions, {self.cfg.intervene_lat_min}")
         lines.append(f"Maximum latitude of interventions, {self.cfg.intervene_lat_max}")
+        if self.cfg.intervene_region != "GBR":
+            # Python-only option; omitted at its default so output matches NetLogo.
+            lines.append(f"Region of interventions, {self.cfg.intervene_region}")
         lines.append("")
         lines.append(f"Rubble consolidation start year, {self.cfg.start_rubble_consolidation}")
         lines.append(f"Annual number of consolidated reefs, {self.cfg.consolidation_reefs}")

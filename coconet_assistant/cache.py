@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+import coconet
 
 from coconet_assistant.scenario import scenario_fingerprint
 
@@ -30,12 +33,25 @@ def _file_stamp(path_value: Any) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=1)
+def engine_stamp() -> str:
+    """Hash of the ``coconet`` engine source, so a code change never reuses old runs."""
+    package = Path(coconet.__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(package.glob("*.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 def run_cache_key(config: dict[str, Any]) -> str:
-    """Identity of a run: scenario fields plus reefs/coastline file stamps."""
+    """Identity of a run: scenario fields, reefs/coastline file stamps, engine version."""
     digest = scenario_fingerprint(config)
     stamps = {
         "reefs": _file_stamp(config.get("reefs_file")),
         "coastline": _file_stamp(config.get("coastline_file")),
+        "parameter_file": _file_stamp(config.get("parameter_file")),
+        "engine": engine_stamp(),
     }
     extra = json.dumps(stamps, sort_keys=True)
     stamp_digest = hashlib.sha256(extra.encode("utf-8")).hexdigest()[:10]

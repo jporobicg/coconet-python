@@ -6,7 +6,7 @@ from typing import Any
 from coconet_assistant.agent import run_agent_turn
 from coconet_assistant.ollama_client import DEFAULT_NUM_CTX, LLMResponse, OllamaClient
 from coconet_assistant.options import default_config_values, explicit_ssps
-from coconet_assistant.scenario import ScenarioValidationError
+from coconet_assistant.scenario import ScenarioValidationError, build_scenario
 from coconet_assistant.tools import TOOL_SCHEMAS, AssistantStore, ToolDispatcher
 from tests.unit.test_assistant_summarise import write_output
 
@@ -189,7 +189,8 @@ def test_agent_loop_with_mocked_llm(tmp_path: Path, fixture_dir: Path) -> None:
     turn = run_agent_turn(
         client,
         store,
-        "what if we control CoTS in the northern sector and seed thermally tolerant coral from 2030 under SSP2-4.5?",
+        "what if we control CoTS in the northern sector with 4 vessels and seed thermally "
+        "tolerant coral from 2030 under SSP2-4.5?",
         dispatcher=tools,
         on_tool=on_tool,
     )
@@ -232,6 +233,31 @@ def test_llm_confirmed_flag_is_ignored(tmp_path: Path) -> None:
     ran = tools.call("run_ensemble", {"scenario_id": scenario_id, "include_baseline": False})
     assert ran["ok"] is True
     assert len(runs) == 1
+
+
+def test_baseline_reuses_scenario_spinup(tmp_path: Path) -> None:
+    output_src = write_output(tmp_path / "fixture.csv", intervention=True)
+    received: list[Any] = []
+
+    def runner(config: Any, configure_logs: bool = False, spinup_checkpoint: Any = None) -> Any:
+        received.append(spinup_checkpoint)
+        result = _fake_runner(output_src)(config, configure_logs)
+        result.spinup_checkpoint = spinup_checkpoint or {"spinup": "state"}
+        return result
+
+    store = AssistantStore(cache_dir=tmp_path / "cache")
+    tools = ToolDispatcher(store, runner=runner)
+    built = tools.call(
+        "build_scenario",
+        {"climate": "SSP2-4.5", "interventions": [{"type": "coral_seeding", "start_year": 2030}]},
+    )
+    store.mark_confirmed(built["result"]["scenario_id"])
+    ran = tools.call("run_ensemble", {"scenario_id": built["result"]["scenario_id"]})
+    assert ran["ok"] is True
+    # Scenario runs its own spinup; the baseline starts from that checkpoint.
+    assert received == [None, {"spinup": "state"}]
+    assert ran["result"]["baseline_run"]["spinup_reused"] is True
+    assert list((tmp_path / "cache" / "spinup").glob("*.pkl"))
 
 
 def test_build_shows_card_and_keeps_simulation_timing(tmp_path: Path) -> None:
@@ -327,6 +353,65 @@ def test_agent_rejects_climate_that_contradicts_the_question(tmp_path: Path) -> 
     assert "2.6" in first["errors"][0]
     assert second["ok"] is True
     assert store.scenarios[store.last_validated_id].config["SSP"] == 2.6
+
+
+def test_agent_drops_magnitudes_the_manager_never_gave(tmp_path: Path) -> None:
+    store = AssistantStore(cache_dir=tmp_path / "cache")
+    invented = {
+        "climate": "SSP2-4.5",
+        "region": "N",
+        "interventions": [
+            {"type": "cots_control", "start_year": 2030, "vessels": 10},
+            {"type": "coral_seeding", "start_year": 2030, "hectares": 100, "threshold": 20},
+        ],
+    }
+    client = ScriptedLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[{"id": "1", "name": "build_scenario", "arguments": invented}],
+                raw={},
+            ),
+            LLMResponse(content="Please confirm.", tool_calls=[], raw={}),
+        ]
+    )
+    run_agent_turn(
+        client,
+        store,
+        "Control CoTS in the north and seed tolerant corals from 2030 under SSP2-4.5.",
+    )
+    spec = store.scenarios[store.last_validated_id]
+    defaults = build_scenario(
+        climate="SSP2-4.5",
+        region="N",
+        interventions=[
+            {"type": "cots_control", "start_year": 2030},
+            {"type": "coral_seeding", "start_year": 2030},
+        ],
+    ).config
+    for field in ("CoTS_vessels_N", "seed_hectares", "seed_threshold"):
+        assert spec.config[field] == defaults[field]
+    assert sum("was not in your request" in note for note in spec.notes) == 3
+
+
+def test_agent_keeps_magnitudes_the_manager_gave(tmp_path: Path) -> None:
+    store = AssistantStore(cache_dir=tmp_path / "cache")
+    stated = {
+        "climate": "SSP2-4.5",
+        "interventions": [{"type": "fishing_reduction", "start_year": 2027, "fraction": 0.3}],
+    }
+    client = ScriptedLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[{"id": "1", "name": "build_scenario", "arguments": stated}],
+                raw={},
+            ),
+            LLMResponse(content="Please confirm.", tool_calls=[], raw={}),
+        ]
+    )
+    run_agent_turn(client, store, "Cut coral trout fishing by 30% from 2027 under SSP2-4.5.")
+    assert store.scenarios[store.last_validated_id].config["catch_reduction"] == 0.3
 
 
 def test_explicit_ssps_ignores_bare_numbers() -> None:

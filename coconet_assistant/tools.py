@@ -2,26 +2,39 @@
 
 from __future__ import annotations
 
+import os
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from coconet_assistant.ensemble import run_ensemble
+from coconet_assistant.cache import load_cached_run, run_cache_key
+from coconet_assistant.ensemble import estimate_run_seconds, run_ensemble
 from coconet_assistant.options import (
     SIMULATION_TIMING_FIELDS,
     list_options,
     normalise_summary_region,
+    region_label,
 )
 from coconet_assistant.plot import plot_results
 from coconet_assistant.scenario import (
     ScenarioSpec,
     ScenarioValidationError,
+    active_start_years,
     baseline_config,
     build_scenario,
     spec_from_config,
+    spinup_shared_with_baseline,
+    targeted_regions,
     validate_scenario,
 )
-from coconet_assistant.summarise import compare_summaries, summarise_output
+from coconet_assistant.summarise import (
+    compare_summaries,
+    paired_series,
+    region_year_sums,
+    replicate_means,
+    summarise_output,
+)
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -225,6 +238,7 @@ class AssistantStore:
     # Keyed by (run_id, region code or None for GBR-wide) so a regional summary is
     # never reused as a GBR-wide one.
     summaries: dict[tuple[str, str | None], dict[str, Any]] = field(default_factory=dict)
+    region_sums: dict[str, Any] = field(default_factory=dict)
     last_validated_id: str | None = None
     last_progress: dict[str, Any] | None = None
     confirmed_ids: set[str] = field(default_factory=set)
@@ -358,18 +372,15 @@ class ToolDispatcher:
         # "yes") counts. A ``confirmed`` flag sent by the language model is ignored.
         confirmed = spec.scenario_id in self.store.confirmed_ids
         include_baseline = bool(args.get("include_baseline", True))
-        primary = run_ensemble(
-            spec,
-            cache_dir=self.store.cache_dir,
-            confirmed=confirmed,
-            run_name=spec.name,
-            progress_callback=self.store.record_progress,
-            runner=self.runner,
-        )
-        self.store.runs[primary["run_id"]] = primary
+        base_fields = baseline_config(spec.config)
+        # Scenario and baseline are identical up to start_year when no intervention
+        # starts earlier, so they (and later questions with the same climate) share
+        # one ensemble-0 spinup, stored on disk next to the cached runs.
+        shared = confirmed and spinup_shared_with_baseline(spec.config)
+        spinup_file = self._spinup_file(base_fields) if shared else None
+        primary = self._run_with_spinup(spec, confirmed, spinup_file)
         payload: dict[str, Any] = {"run": primary}
         if include_baseline:
-            base_fields = baseline_config(spec.config)
             base_spec = spec_from_config(
                 base_fields,
                 name=f"{spec.name} baseline",
@@ -377,17 +388,95 @@ class ToolDispatcher:
             )
             base_spec = self.store.remember_scenario(base_spec)
             self.store.mark_confirmed(base_spec.scenario_id)
-            baseline = run_ensemble(
-                base_spec,
-                cache_dir=self.store.cache_dir,
-                confirmed=True,
-                run_name=base_spec.name,
-                progress_callback=self.store.record_progress,
-                runner=self.runner,
-            )
-            self.store.runs[baseline["run_id"]] = baseline
-            payload["baseline_run"] = baseline
+            payload["baseline_run"] = self._run_with_spinup(base_spec, True, spinup_file)
         return payload
+
+    def run_plan(self, scenario_id: str, *, include_baseline: bool = True) -> dict[str, Any]:
+        """What confirming would do: cached runs, shared spinup, estimated run time."""
+        spec = self.store.require_scenario(scenario_id)
+        fields = validate_scenario(spec.config)
+        base_fields = validate_scenario(baseline_config(spec.config))
+        cached = load_cached_run(self.store.cache_dir, run_cache_key(fields)) is not None
+        base_cached = load_cached_run(self.store.cache_dir, run_cache_key(base_fields)) is not None
+        shared = spinup_shared_with_baseline(fields)
+        spinup_cached = shared and self._spinup_file(base_fields).is_file()
+        seconds = 0.0
+        if not cached:
+            seconds += estimate_run_seconds(
+                fields,
+                include_baseline=False,
+                spinup_cached=spinup_cached,
+                cpu_count=os.cpu_count(),
+            )
+        if include_baseline and not base_cached:
+            seconds += estimate_run_seconds(
+                base_fields,
+                include_baseline=False,
+                spinup_cached=spinup_cached or (shared and not cached),
+                cpu_count=os.cpu_count(),
+            )
+        return {
+            "cached": cached,
+            "baseline_cached": base_cached,
+            "spinup_shared": shared,
+            "spinup_cached": spinup_cached,
+            "estimate_seconds": seconds,
+        }
+
+    def report(self, run_id: str, baseline_run_id: str) -> list[dict[str, Any]]:
+        """Comparison and plots for the targeted region(s) first, then GBR-wide."""
+        run = self._require_run(run_id)
+        regions: list[str | None] = [*targeted_regions(run.get("config") or {}), None]
+        sections = []
+        for region in regions:
+            args = {"run_ids": [run_id, baseline_run_id], "baseline_run_id": baseline_run_id}
+            if region:
+                args["region"] = region
+            comparison = self._compare_scenarios(args)
+            plot = self._plot(
+                {"run_id": run_id, "baseline_run_id": baseline_run_id, "region": region}
+            )
+            sections.append(
+                {
+                    "region": region,
+                    "region_label": region_label(region),
+                    "comparison": comparison,
+                    "figure_paths": plot.get("figure_paths") or [],
+                }
+            )
+        return sections
+
+    def _spinup_file(self, baseline_fields: dict[str, Any]) -> Path:
+        key = run_cache_key(validate_scenario(baseline_fields))
+        return self.store.cache_dir / "spinup" / f"{key}.pkl"
+
+    def _run_with_spinup(
+        self,
+        spec: ScenarioSpec,
+        confirmed: bool,
+        spinup_file: Path | None,
+    ) -> dict[str, Any]:
+        checkpoint = None
+        if spinup_file is not None and spinup_file.is_file():
+            # Written by this app into its own cache directory (see below).
+            checkpoint = pickle.loads(spinup_file.read_bytes())
+        sink: dict[str, Any] = {}
+        run = run_ensemble(
+            spec,
+            cache_dir=self.store.cache_dir,
+            confirmed=confirmed,
+            run_name=spec.name,
+            progress_callback=self.store.record_progress,
+            runner=self.runner,
+            spinup_checkpoint=checkpoint,
+            spinup_sink=sink,
+        )
+        produced = sink.get("checkpoint")
+        if spinup_file is not None and produced is not None and not spinup_file.is_file():
+            spinup_file.parent.mkdir(parents=True, exist_ok=True)
+            spinup_file.write_bytes(pickle.dumps(produced))
+        self.store.runs[run["run_id"]] = run
+        return run
 
     def _require_run(self, run_id: str) -> dict[str, Any]:
         if run_id not in self.store.runs:
@@ -405,8 +494,15 @@ class ToolDispatcher:
                 region=code,
                 scenario_name=run.get("name"),
                 scenario_config=run.get("config"),
+                sums=self._sums(run),
             )
         return self.store.summaries[key]
+
+    def _sums(self, run: dict[str, Any]) -> Any:
+        """Per-region sums for a run, read from its output file once per session."""
+        if run["run_id"] not in self.store.region_sums:
+            self.store.region_sums[run["run_id"]] = region_year_sums(run["output_file"])
+        return self.store.region_sums[run["run_id"]]
 
     def _summarise_results(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._summary(str(args["run_id"]), args.get("region"))
@@ -415,22 +511,39 @@ class ToolDispatcher:
         run_ids = [str(x) for x in args.get("run_ids") or []]
         if len(run_ids) < 2:
             raise ScenarioValidationError(["compare_scenarios needs at least two run_ids."])
-        region = args.get("region")
+        region = normalise_summary_region(args.get("region"))
         summaries: dict[str, dict[str, Any]] = {}
+        replicates: dict[str, Any] = {}
+        starts: list[int] = []
         for run_id in run_ids:
-            summaries[self._require_run(run_id)["name"]] = self._summary(run_id, region)
+            run = self._require_run(run_id)
+            summaries[run["name"]] = self._summary(run_id, region)
+            replicates[run["name"]] = replicate_means(self._sums(run), region)
+            starts.extend(active_start_years(run.get("config") or {}))
         baseline_name = None
         if args.get("baseline_run_id"):
             baseline_name = self._require_run(str(args["baseline_run_id"])).get("name")
-        return compare_summaries(summaries, baseline_name=baseline_name)
+        return compare_summaries(
+            summaries,
+            baseline_name=baseline_name,
+            replicates=replicates,
+            effect_from_year=min(starts) if starts else None,
+        )
 
     def _plot(self, args: dict[str, Any]) -> dict[str, Any]:
         run = self._require_run(str(args["run_id"]))
         region = normalise_summary_region(args.get("region"))
         summary = self._summary(run["run_id"], region)
         baseline = None
+        differences: dict[str, list[dict[str, Any]]] = {}
         if args.get("baseline_run_id"):
-            baseline = self._summary(str(args["baseline_run_id"]), region)
+            base_run = self._require_run(str(args["baseline_run_id"]))
+            baseline = self._summary(base_run["run_id"], region)
+            scenario_reps = replicate_means(self._sums(run), region)
+            baseline_reps = replicate_means(self._sums(base_run), region)
+            for metric in ("coral_total", "S_manta"):
+                differences[metric] = paired_series(scenario_reps, baseline_reps, metric)
+        starts = active_start_years(run.get("config") or {})
         plot_dir = self.store.cache_dir / "plots" / run["run_id"]
         return plot_results(
             summary,
@@ -438,4 +551,6 @@ class ToolDispatcher:
             output_dir=plot_dir,
             groups=args.get("groups"),
             stem=f"{run['run_id']}_{region or 'GBR'}",
+            effect_from_year=min(starts) if starts else None,
+            differences=differences,
         )
