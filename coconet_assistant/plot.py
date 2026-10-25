@@ -69,6 +69,8 @@ def plot_series_payload(
         if traces:
             panels.append({"group": group, "traces": traces})
     return {
+        "region": summary.get("region"),
+        "region_label": summary.get("region_label") or "all reefs (GBR-wide)",
         "panels": panels,
         "notes": [
             "Shaded bands are the 10-90% range across stochastic ensembles.",
@@ -108,7 +110,8 @@ def render_plots(
             ax.fill_between(years, q10, q90, color=line.get_color(), alpha=0.18)
         ax.set_xlabel("Year")
         ax.set_ylabel(panel["group"].replace("_", " "))
-        ax.set_title(panel["group"].replace("_", " ").title())
+        title = panel["group"].replace("_", " ").title()
+        ax.set_title(f"{title} — {payload.get('region_label', 'all reefs (GBR-wide)')}")
         ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()

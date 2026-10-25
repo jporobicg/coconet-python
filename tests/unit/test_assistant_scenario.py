@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import fields
 
 import pytest
@@ -15,14 +16,33 @@ from coconet_assistant.scenario import (
 )
 
 
-def test_list_options_uses_real_config_fields() -> None:
+def test_list_options_summary_fits_small_context() -> None:
     options = list_options()
+    assert "parameters" not in options
+    assert "fields" not in options["intervention_types"]["coral_seeding"]
+    assert options["intervention_types"]["coral_seeding"]["params"]["reefs"] == "seed_reefs"
+    # Keep the default tool payload well under a few thousand tokens (~4 chars per token).
+    assert len(json.dumps(options)) < 8000
+
+
+def test_list_options_uses_real_config_fields() -> None:
+    options = list_options(detail="fields")
     catalog_fields = {item["field"] for item in options["parameters"]}
     assert catalog_fields == {f.name for f in fields(CoconetConfig)}
     assert options["climate_scenarios"]["allowed"] == list(SUPPORTED_SSP)
     assert "cots_control" in options["intervention_types"]
     assert "coral_seeding" in options["intervention_types"]
     assert options["intervention_types"]["cots_control"]["fields"][0] == "start_CoTS_control"
+
+
+def test_whole_reef_region_aliases() -> None:
+    spec = build_scenario(
+        climate="SSP2-4.5",
+        region="all",
+        interventions=[{"type": "cots_control", "start_year": 2030}],
+    )
+    assert spec.config["CoTS_vessels_GBR"] > 0
+    assert build_scenario(climate="2.6", region="whole GBR").config["SSP"] == 2.6
 
 
 def test_resolve_ssp_aliases() -> None:

@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from coconet_assistant.options import CORAL_GROUP_LABELS, OUTPUT_METRICS
+from coconet_assistant.options import CORAL_GROUP_LABELS, OUTPUT_METRICS, region_label
 from coconet_assistant.output import add_derived_columns, filter_replicates, read_output_table
 from coconet_assistant.scenario import display_settings
 
@@ -130,6 +130,7 @@ def summarise_output(
     return {
         "scenario_name": scenario_name,
         "region": region,
+        "region_label": region_label(region),
         "n_ensembles": n_ensembles,
         "n_reef_rows": len(table),
         "years": years,
@@ -158,7 +159,7 @@ def _facts_from_snapshot(
     """Deterministic sentences the language model may paraphrase (not invent)."""
     facts: list[str] = []
     who = scenario_name or "This scenario"
-    where = f" in region {region}" if region else ""
+    where = f" ({region_label(region)})"
     if last_year is None:
         facts.append(f"{who} produced no yearly snapshot.")
         return facts
@@ -199,6 +200,14 @@ def compare_summaries(
         baseline_name = next((n for n in names if "baseline" in n.lower()), names[0])
     if baseline_name not in summaries:
         raise ValueError(f"Baseline name {baseline_name!r} is not in the summary set.")
+
+    regions = {summary.get("region") for summary in summaries.values()}
+    if len(regions) > 1:
+        raise ValueError(
+            "compare_scenarios received summaries for different regions "
+            f"({sorted(str(r or 'GBR') for r in regions)}); compare one region at a time."
+        )
+    region = regions.pop()
 
     baseline = summaries[baseline_name]
     shared_years = set(baseline.get("years") or [])
@@ -242,10 +251,12 @@ def compare_summaries(
             row["values"][name] = entry
         comparison_rows.append(row)
 
-    facts = _comparison_facts(comparison_rows, baseline_name, last_year)
+    facts = _comparison_facts(comparison_rows, baseline_name, last_year, region)
     suggestions = suggest_next_scenarios(summaries, comparison_rows, baseline_name)
 
     return {
+        "region": region,
+        "region_label": region_label(region),
         "baseline": baseline_name,
         "scenarios": names,
         "end_year": last_year,
@@ -261,13 +272,14 @@ def _comparison_facts(
     rows: list[dict[str, Any]],
     baseline_name: str,
     last_year: int | None,
+    region: str | None = None,
 ) -> list[str]:
     facts: list[str] = []
     if last_year is None:
         return ["No shared years between the compared scenarios."]
     facts.append(
-        f"Comparison year {last_year}. Differences are intervention mean minus "
-        f"'{baseline_name}' mean, using the same aggregation as summarise_results."
+        f"Comparison year {last_year}, {region_label(region)}. Differences are intervention "
+        f"mean minus '{baseline_name}' mean, using the same aggregation as summarise_results."
     )
     for row in rows:
         if row["metric"] not in {"coral_total", "C_tt", "S_manta", "emperor", "trout"}:

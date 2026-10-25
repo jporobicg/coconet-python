@@ -1,0 +1,8 @@
+# Keep the manager assistant in-house: no usage telemetry, and only this machine
+# can open the app. To share on a trusted network, change server.address deliberately.
+[browser]
+gatherUsageStats = false
+
+[server]
+address = "localhost"
+headless = false

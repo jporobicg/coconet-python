@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from coconet_assistant.ensemble import run_ensemble
-from coconet_assistant.options import list_options
+from coconet_assistant.options import (
+    SIMULATION_TIMING_FIELDS,
+    list_options,
+    normalise_summary_region,
+)
 from coconet_assistant.plot import plot_results
 from coconet_assistant.scenario import (
     ScenarioSpec,
@@ -25,11 +29,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "list_options",
             "description": (
-                "List valid CoCoNet climate scenarios (SSP numbers), intervention "
-                "types, CoconetConfig field names, defaults, and ranges. Call this "
-                "before inventing any field name."
+                "List valid CoCoNet climate scenarios (SSP numbers), regions, and "
+                "intervention types with their parameters. Call this before "
+                "inventing any parameter name."
             ),
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "detail": {
+                        "type": "string",
+                        "enum": ["summary", "fields"],
+                        "description": "summary (default) or fields for every raw config field.",
+                    },
+                },
+                "additionalProperties": False,
+            },
         },
     },
     {
@@ -51,9 +65,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "description": "e.g. SSP2-4.5 or 4.5. Mapped onto config.SSP.",
                     },
                     "ssp": {"type": "number"},
-                    "start_year": {"type": "integer"},
+                    "intervention_start_year": {
+                        "type": "integer",
+                        "description": (
+                            "Year interventions begin, used when an intervention has no "
+                            "start_year of its own. The simulation start year is fixed."
+                        ),
+                    },
                     "end_year": {"type": "integer"},
-                    "projection_year": {"type": "integer"},
                     "ensemble_runs": {
                         "type": "integer",
                         "description": "Stochastic replicates. Minimum 2; default 20.",
@@ -65,6 +84,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "interventions": {
                         "type": "array",
                         "items": {"type": "object"},
+                        "description": (
+                            "Objects with a 'type' from list_options plus that type's params, "
+                            'e.g. {"type": "coral_seeding", "start_year": 2030, "reefs": 50}.'
+                        ),
                     },
                     "config_overrides": {
                         "type": "object",
@@ -99,21 +122,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "run_ensemble",
             "description": (
-                "Run a validated scenario as an ensemble via the CoCoNet Python API. "
-                "Set confirmed=true only after the manager has accepted the settings. "
-                "Never request ensemble_runs=1."
+                "Run a scenario as an ensemble via the CoCoNet Python API. Only works "
+                "after the manager has clicked Confirm in the app; otherwise it is "
+                "refused. Never request ensemble_runs=1."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "scenario_id": {"type": "string"},
-                    "confirmed": {"type": "boolean"},
                     "include_baseline": {
                         "type": "boolean",
                         "description": "Also run a no-intervention pair with the same climate/years.",
                     },
                 },
-                "required": ["scenario_id", "confirmed"],
+                "required": ["scenario_id"],
                 "additionalProperties": False,
             },
         },
@@ -150,6 +172,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "run_ids": {"type": "array", "items": {"type": "string"}},
                     "baseline_run_id": {"type": "string"},
+                    "region": {
+                        "type": "string",
+                        "description": "FN, N, C, or S; omit for all reefs (GBR-wide).",
+                    },
                 },
                 "required": ["run_ids"],
                 "additionalProperties": False,
@@ -169,6 +195,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "run_id": {"type": "string"},
                     "baseline_run_id": {"type": "string"},
+                    "region": {
+                        "type": "string",
+                        "description": "FN, N, C, or S; omit for all reefs (GBR-wide).",
+                    },
                     "groups": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -192,7 +222,9 @@ class AssistantStore:
     coastline_file: str | None = None
     scenarios: dict[str, ScenarioSpec] = field(default_factory=dict)
     runs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    summaries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Keyed by (run_id, region code or None for GBR-wide) so a regional summary is
+    # never reused as a GBR-wide one.
+    summaries: dict[tuple[str, str | None], dict[str, Any]] = field(default_factory=dict)
     last_validated_id: str | None = None
     last_progress: dict[str, Any] | None = None
     confirmed_ids: set[str] = field(default_factory=set)
@@ -252,25 +284,49 @@ class ToolDispatcher:
         except Exception as exc:
             return {"ok": False, "tool": name, "errors": [str(exc)]}
 
-    def _list_options(self, _args: dict[str, Any]) -> dict[str, Any]:
-        return list_options()
+    def _list_options(self, args: dict[str, Any]) -> dict[str, Any]:
+        return list_options(detail=str(args.get("detail") or "summary"))
 
     def _build_scenario(self, args: dict[str, Any]) -> dict[str, Any]:
+        ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+        ## ~ Keep simulation timing out of the LLM's hands ~ ##
+        ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+        # Language models read "from 2027" as the simulation start year, which breaks
+        # spin-up and save_year. A top-level start year is treated as the default
+        # intervention start; the simulation timing stays at the model defaults.
+        notes: list[str] = []
+        default_start = args.get("intervention_start_year", args.get("start_year"))
+        interventions = []
+        for item in args.get("interventions") or []:
+            entry = dict(item) if isinstance(item, dict) else item
+            if isinstance(entry, dict) and default_start is not None and "start_year" not in entry:
+                entry["start_year"] = default_start
+            interventions.append(entry)
+        if args.get("projection_year") is not None:
+            notes.append("projection_year is fixed by the app and was ignored.")
+        overrides = dict(args.get("config_overrides") or {})
+        for name in SIMULATION_TIMING_FIELDS:
+            if name in overrides:
+                overrides.pop(name)
+                notes.append(f"{name} is fixed by the app and was ignored.")
+
         spec = build_scenario(
             name=args.get("name"),
             description=args.get("description") or "",
             climate=args.get("climate"),
             ssp=args.get("ssp"),
-            start_year=args.get("start_year"),
             end_year=args.get("end_year"),
-            projection_year=args.get("projection_year"),
             ensemble_runs=args.get("ensemble_runs"),
             region=args.get("region"),
-            interventions=args.get("interventions"),
-            config_overrides=args.get("config_overrides"),
+            interventions=interventions,
+            config_overrides=overrides or None,
             apply_region_bounds=args.get("apply_region_bounds", True),
         )
+        spec.notes.extend(notes)
         spec = self.store.remember_scenario(spec)
+        # build_scenario already validated the config, so the app can show the
+        # confirmation card straight away.
+        self.store.last_validated_id = spec.scenario_id
         return spec.to_dict()
 
     def _validate_scenario(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -298,7 +354,9 @@ class ToolDispatcher:
 
     def _run_ensemble(self, args: dict[str, Any]) -> dict[str, Any]:
         spec = self.store.require_scenario(str(args.get("scenario_id", "")))
-        confirmed = bool(args.get("confirmed")) or spec.scenario_id in self.store.confirmed_ids
+        # Only a human confirmation (``mark_confirmed`` from the app's button or a typed
+        # "yes") counts. A ``confirmed`` flag sent by the language model is ignored.
+        confirmed = spec.scenario_id in self.store.confirmed_ids
         include_baseline = bool(args.get("include_baseline", True))
         primary = run_ensemble(
             spec,
@@ -336,28 +394,31 @@ class ToolDispatcher:
             raise ScenarioValidationError([f"Unknown run_id {run_id!r}."])
         return self.store.runs[run_id]
 
+    def _summary(self, run_id: str, region: str | None) -> dict[str, Any]:
+        """Summary for one run and region, computed once per (run, region) pair."""
+        run = self._require_run(run_id)
+        code = normalise_summary_region(region)
+        key = (run["run_id"], code)
+        if key not in self.store.summaries:
+            self.store.summaries[key] = summarise_output(
+                run["output_file"],
+                region=code,
+                scenario_name=run.get("name"),
+                scenario_config=run.get("config"),
+            )
+        return self.store.summaries[key]
+
     def _summarise_results(self, args: dict[str, Any]) -> dict[str, Any]:
-        run = self._require_run(str(args["run_id"]))
-        summary = summarise_output(
-            run["output_file"],
-            region=args.get("region"),
-            scenario_name=run.get("name"),
-            scenario_config=run.get("config"),
-        )
-        self.store.summaries[run["run_id"]] = summary
-        return summary
+        return self._summary(str(args["run_id"]), args.get("region"))
 
     def _compare_scenarios(self, args: dict[str, Any]) -> dict[str, Any]:
         run_ids = [str(x) for x in args.get("run_ids") or []]
         if len(run_ids) < 2:
             raise ScenarioValidationError(["compare_scenarios needs at least two run_ids."])
+        region = args.get("region")
         summaries: dict[str, dict[str, Any]] = {}
         for run_id in run_ids:
-            run = self._require_run(run_id)
-            if run_id in self.store.summaries:
-                summaries[run["name"]] = self.store.summaries[run_id]
-            else:
-                summaries[run["name"]] = self._summarise_results({"run_id": run_id})
+            summaries[self._require_run(run_id)["name"]] = self._summary(run_id, region)
         baseline_name = None
         if args.get("baseline_run_id"):
             baseline_name = self._require_run(str(args["baseline_run_id"])).get("name")
@@ -365,20 +426,16 @@ class ToolDispatcher:
 
     def _plot(self, args: dict[str, Any]) -> dict[str, Any]:
         run = self._require_run(str(args["run_id"]))
-        if run["run_id"] not in self.store.summaries:
-            self._summarise_results({"run_id": run["run_id"]})
-        summary = self.store.summaries[run["run_id"]]
+        region = normalise_summary_region(args.get("region"))
+        summary = self._summary(run["run_id"], region)
         baseline = None
         if args.get("baseline_run_id"):
-            base_run = self._require_run(str(args["baseline_run_id"]))
-            if base_run["run_id"] not in self.store.summaries:
-                self._summarise_results({"run_id": base_run["run_id"]})
-            baseline = self.store.summaries[base_run["run_id"]]
+            baseline = self._summary(str(args["baseline_run_id"]), region)
         plot_dir = self.store.cache_dir / "plots" / run["run_id"]
         return plot_results(
             summary,
             baseline=baseline,
             output_dir=plot_dir,
             groups=args.get("groups"),
-            stem=run["run_id"],
+            stem=f"{run['run_id']}_{region or 'GBR'}",
         )

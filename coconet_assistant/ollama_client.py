@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "qwen2.5"
+# Ollama's own default context (2-4k tokens) silently truncates the system prompt
+# once tool results arrive, so the window is always set explicitly.
+DEFAULT_NUM_CTX = 16384
 
 
 class OllamaNotAvailable(RuntimeError):
@@ -22,6 +25,11 @@ def default_ollama_host() -> str:
 
 def default_ollama_model() -> str:
     return os.environ.get("COCONET_ASSISTANT_MODEL", DEFAULT_MODEL)
+
+
+def default_num_ctx() -> int:
+    value = os.environ.get("COCONET_OLLAMA_NUM_CTX", "").strip()
+    return int(value) if value.isdigit() and int(value) > 0 else DEFAULT_NUM_CTX
 
 
 def _import_httpx() -> Any:
@@ -67,11 +75,13 @@ class OllamaClient:
         self,
         host: str | None = None,
         model: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
+        num_ctx: int | None = None,
     ) -> None:
         self.host = (host or default_ollama_host()).rstrip("/")
         self.model = model or default_ollama_model()
         self.timeout = timeout
+        self.num_ctx = num_ctx or default_num_ctx()
 
     def check(self) -> dict[str, Any]:
         """Return tags if Ollama is up; raise ``OllamaNotAvailable`` otherwise."""
@@ -118,6 +128,8 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            # Deterministic translation: the same question gives the same scenario.
+            "options": {"num_ctx": self.num_ctx, "temperature": 0, "seed": 0},
         }
         if tools:
             body["tools"] = tools

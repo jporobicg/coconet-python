@@ -7,6 +7,7 @@ and pH branches actually test in ``coconet.model``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import fields
 from typing import Any
 
@@ -35,6 +36,14 @@ SSP_ALIASES: dict[str, float] = {
     "ssp5-8.5": 8.5,
     "ssp8.5": 8.5,
 }
+
+# Simulation timing fields the language model may not change (see ToolDispatcher).
+SIMULATION_TIMING_FIELDS: tuple[str, ...] = (
+    "start_year",
+    "spinup_backtrack_years",
+    "save_year",
+    "projection_year",
+)
 
 # Reef Region column codes used by CoTS control (control_region in CoconetModel).
 COTS_REGION_FIELDS: dict[str, str] = {
@@ -95,6 +104,16 @@ REGION_BOUNDS: dict[str, dict[str, float]] = {
 
 REGION_CODE_ALIASES: dict[str, str] = {
     "gbr": "GBR",
+    "all": "GBR",
+    "all reefs": "GBR",
+    "all regions": "GBR",
+    "everywhere": "GBR",
+    "whole gbr": "GBR",
+    "entire gbr": "GBR",
+    "gbr-wide": "GBR",
+    "whole reef": "GBR",
+    "great barrier reef": "GBR",
+    "the great barrier reef": "GBR",
     "fn": "FN",
     "far-northern": "FN",
     "far northern": "FN",
@@ -433,6 +452,26 @@ def resolve_ssp(value: Any) -> float:
     )
 
 
+_EXPLICIT_SSP_PATTERNS = (
+    re.compile(r"\bssp\s*\d\s*[-\u2013\u2014]\s*(\d\.\d)", re.IGNORECASE),
+    re.compile(r"\bssp\s*(\d\.\d)\b", re.IGNORECASE),
+)
+
+
+def explicit_ssps(text: str) -> set[float]:
+    """SSP values the manager named explicitly (``SSP1-2.6``, ``SSP 4.5``).
+
+    Bare numbers are ignored so percentages and years never count as climate.
+    """
+    found: set[float] = set()
+    for pattern in _EXPLICIT_SSP_PATTERNS:
+        for match in pattern.finditer(text):
+            value = float(match.group(1))
+            if value in SUPPORTED_SSP:
+                found.add(value)
+    return found
+
+
 def resolve_region_code(value: str) -> str | None:
     key = value.strip().lower()
     if key in REGION_CODE_ALIASES:
@@ -443,10 +482,28 @@ def resolve_region_code(value: str) -> str | None:
     return None
 
 
+def normalise_summary_region(value: str | None) -> str | None:
+    """Region code for filtering output rows; ``None`` means all reefs (GBR-wide)."""
+    if value is None or not str(value).strip():
+        return None
+    code = resolve_region_code(str(value))
+    if code is None:
+        raise ValueError(f"Unknown region {value!r}. Use FN, N, C, S, or GBR for all reefs.")
+    return None if code == "GBR" else code
+
+
+def region_label(code: str | None) -> str:
+    names = {"FN": "Far-Northern", "N": "Northern", "C": "Central", "S": "Southern"}
+    return f"{names[code]} region ({code}) reefs only" if code in names else "all reefs (GBR-wide)"
+
+
 def resolve_cots_vessel_field(region: str) -> str:
     key = region.strip().lower()
     if key in COTS_REGION_FIELDS:
         return COTS_REGION_FIELDS[key]
+    code = resolve_region_code(region)
+    if code is not None and code.lower() in COTS_REGION_FIELDS:
+        return COTS_REGION_FIELDS[code.lower()]
     raise ValueError(
         f"Unknown CoTS region {region!r}. "
         f"Valid names: GBR, FN (far-northern), N (northern), C (central), "
@@ -454,8 +511,56 @@ def resolve_cots_vessel_field(region: str) -> str:
     )
 
 
-def list_options() -> dict[str, Any]:
-    """Tool payload: valid interventions, climate scenarios, parameters, ranges."""
+def _intervention_summary() -> dict[str, dict[str, Any]]:
+    """Intervention catalogue without raw field lists (the LLM should use ``params``)."""
+    return {
+        name: {k: v for k, v in spec.items() if k != "fields"}
+        for name, spec in INTERVENTION_TYPES.items()
+    }
+
+
+def list_options(detail: str = "summary") -> dict[str, Any]:
+    """Tool payload: valid interventions, climate scenarios, parameters, ranges.
+
+    ``detail="summary"`` (default) is the compact catalogue the language model needs
+    to build a scenario. ``detail="fields"`` adds every ``CoconetConfig`` field with
+    its default; it is several thousand tokens, so it is only sent on request.
+    """
+    if detail not in {"summary", "fields"}:
+        raise ValueError("detail must be 'summary' or 'fields'.")
+    summary: dict[str, Any] = {
+        "climate_scenarios": {
+            "field": "SSP",
+            "allowed": list(SUPPORTED_SSP),
+            "aliases": {
+                "SSP1-1.9": 1.9,
+                "SSP1-2.6": 2.6,
+                "SSP2-4.5": 4.5,
+                "SSP3-7.0": 7.0,
+                "SSP5-8.5": 8.5,
+            },
+        },
+        "regions": {
+            "codes": ["GBR", "FN", "N", "C", "S"],
+            "names": "FN far-northern, N northern, C central, S southern, GBR whole reef",
+        },
+        "intervention_types": _intervention_summary(),
+        "simulation_years": (
+            "Simulation start, save, and projection years are fixed by the app. "
+            "Only set end_year and each intervention's own start_year."
+        ),
+        "ensemble_runs": {"min": 2, "default": 20, "typical": [20, 50]},
+        "honest_limits": [
+            "Rubble is simulated (R_site / R_reef) but is not written to output.csv.",
+            "The model is a GBR-scale abstraction, not a reef-by-reef operational forecast.",
+            "Ensemble bands are stochastic spread only; they omit structural and data error.",
+            "Discrete SSP values only; there is no continuous climate pathway.",
+        ],
+    }
+    if detail == "summary":
+        summary["more"] = "Call list_options with detail='fields' for every raw config field."
+        return summary
+
     defaults = default_config_values()
     parameters: list[dict[str, Any]] = []
     for name, typ in config_field_types().items():

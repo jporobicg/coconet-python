@@ -62,6 +62,16 @@ Optional environment:
 | --- | --- | --- |
 | `COCONET_ASSISTANT_MODEL` | Ollama model tag | `qwen2.5` |
 | `COCONET_OLLAMA_HOST` | Ollama base URL | `http://127.0.0.1:11434` |
+| `COCONET_OLLAMA_NUM_CTX` | Context window sent with every request | `16384` |
+
+Every request also sends `temperature: 0` and `seed: 0`, so the same question gives
+the same proposed scenario. The context window is set explicitly because Ollama's
+own default (2–4k tokens) silently truncates the system prompt once tool results
+arrive.
+
+`.streamlit/config.toml` turns off Streamlit usage statistics and binds the app to
+`localhost`, so only this machine can open it. Change `server.address` deliberately
+if you want to share the app on a trusted network.
 
 Completed ensembles are written under `.coconet_assistant_cache/` (configurable
 in the sidebar). Asking the same scenario again reuses the cached `output.csv`.
@@ -77,9 +87,13 @@ in the sidebar). Asking the same scenario again reuses the cached `output.csv`.
 Typical flow:
 
 1. You ask a question.
-2. The assistant calls `list_options` / `build_scenario` / `validate_scenario`.
+2. The assistant calls `list_options` and `build_scenario`. Simulation timing
+   (`start_year`, `save_year`, `projection_year`, spin-up) is fixed by the app; the
+   assistant only sets `end_year` and each intervention's start year.
 3. You see the proposed `CoconetConfig` settings (field labels and values) and
-   click **Confirm and run ensemble** (or type “yes”).
+   click **Confirm and run ensemble** (or type “yes”). Only this human
+   confirmation can start a run: a `confirmed` flag from the language model is
+   ignored.
 4. CoCoNet runs ensembles 1..N (default 20, never a single stochastic run). A
    no-intervention baseline with the same climate, years, and ensemble size is
    run unless you turn that off.
@@ -121,6 +135,10 @@ For each year, reefs are averaged inside each stochastic ensemble, then the
 mean and 10th–90th percentiles are taken across ensembles 1..N. Ensemble 0
 (spin-up) is excluded.
 
+Every summary, comparison, and plot states which reefs it covers: all reefs
+(GBR-wide) or one region (`FN`, `N`, `C`, `S`). Summaries are stored per run and
+region, and a comparison never mixes regions.
+
 Reported series: total coral cover (sum of the six groups), each group,
 `S_manta` (CoTS), emperors (`E_1`…`E_5`), coral trout (`G_1`…`G_5`).
 
@@ -151,3 +169,14 @@ uv run pytest tests/unit/test_assistant_scenario.py \
               tests/unit/test_assistant_summarise.py \
               tests/unit/test_assistant_tools.py
 ```
+
+To check how well a real local model translates manager questions, run the
+evaluation set against a running Ollama. It checks 10 typical questions against
+their expected settings and never runs a simulation:
+
+```bash
+uv run --extra assistant python scripts/eval_assistant.py --model qwen2.5 --repeats 3
+```
+
+It exits non-zero when fewer than 90% of cases pass. Run it before changing the
+default model, the system prompt, or the tool schemas.
