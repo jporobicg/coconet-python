@@ -46,8 +46,8 @@ CAVEATS: tuple[str, ...] = (
     "or an operational management optimiser.",
     "Climate is represented by a small set of SSP numbers (1.9, 2.6, 4.5, 7.0, 8.5), "
     "not a continuous emissions pathway.",
-    "Most spatial interventions treat reefs in priority order inside a lat/lon box; "
-    "CoTS regional control uses Region codes (FN, N, C, S, GBR) instead.",
+    "Interventions treat reefs in priority order. A named region uses the reefs' own "
+    "Region codes (FN, N, C, S) for every lever, CoTS control included.",
 )
 
 

@@ -60,6 +60,13 @@ def _duration(seconds: float) -> str:
     return f"about {seconds / 3600:.1f} hours"
 
 
+def _range(seconds: float) -> str:
+    # The estimate uses the slowest measured speed; a quieter machine ran ~30% faster.
+    if seconds < 3600:
+        return _duration(seconds)
+    return f"about {0.7 * seconds / 3600:.0f} to {seconds / 3600:.0f} hours"
+
+
 def _render_settings(scenario_id: str) -> None:
     store: AssistantStore = st.session_state.store
     spec = store.scenarios.get(scenario_id)
@@ -95,8 +102,9 @@ def _render_settings(scenario_id: str) -> None:
     else:
         shared = " The baseline reuses the scenario's spin-up." if plan["spinup_shared"] else ""
         st.warning(
-            f"Estimated run time on this machine: {_duration(plan['estimate_seconds'])} "
-            f"for the scenario and its no-intervention baseline.{shared} The run continues "
+            f"Estimated run time on this machine: {_range(plan['estimate_seconds'])} "
+            f"for the scenario and its no-intervention baseline, depending on other load "
+            f"on the machine.{shared} The run continues "
             "if you close this tab; ask the same question again later to load the results."
         )
     col_a, col_b = st.columns(2)
@@ -150,6 +158,11 @@ def _render_job(job: dict[str, Any]) -> None:
     st.rerun()
 
 
+def _short(text: str) -> str:
+    # Table cells must stay narrow so the verdict column is visible without scrolling.
+    return text.replace(" percentage points", " pts")
+
+
 def _results_table(comparison: dict[str, Any]) -> list[dict[str, Any]]:
     """Rows for the manager: levels, paired change, and its verdict. Numbers from tools."""
     baseline = comparison["baseline"]
@@ -167,14 +180,14 @@ def _results_table(comparison: dict[str, Any]) -> list[dict[str, Any]]:
             table.append(
                 {
                     "Indicator": row["label"],
-                    f"With interventions ({year})": format_metric(metric, value["mean"]),
-                    f"No intervention ({year})": format_metric(metric, base.get("mean", 0.0)),
-                    "Paired change": format_metric(metric, paired["mean"], signed=True),
-                    "10-90% of paired changes": (
+                    f"With ({year})": format_metric(metric, value["mean"]),
+                    f"Without ({year})": format_metric(metric, base.get("mean", 0.0)),
+                    "Paired change": _short(format_metric(metric, paired["mean"], signed=True)),
+                    "10-90% range": _short(
                         f"{format_metric(metric, paired['q10'], signed=True)} to "
                         f"{format_metric(metric, paired['q90'], signed=True)}"
                     ),
-                    "Replicates better": f"{paired['n_better']} of {paired['n_pairs']}",
+                    "Better in": f"{paired['n_better']} of {paired['n_pairs']}",
                     "Verdict": VERDICTS[paired["direction"]],
                 }
             )
@@ -231,8 +244,9 @@ def _explain_results(sections: list[dict[str, Any]]) -> str:
                     "content": (
                         "Write a short manager briefing using ONLY these tool facts. "
                         "Lead with the targeted region, then the whole GBR. Say which "
-                        "changes are clear and which are within replicate noise. Do not "
-                        "add numbers that are not listed.\n\n"
+                        "changes are clear and which are within replicate noise. The run "
+                        "is complete: do not ask for confirmation. Do not add numbers that "
+                        "are not listed.\n\n"
                         + json.dumps(
                             {"facts": facts, "suggestions": suggestions, "caveats": caveats},
                             default=str,
